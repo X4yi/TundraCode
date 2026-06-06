@@ -1,5 +1,6 @@
 /target
 Cargo.lock
+.tundracode
 node_modules/
 dist/
 *.log
@@ -12,3 +13,5 @@ dist/
 .git
 .vscode/
 *.iml
+tundracode_spec_v2.md
+r.md
