@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=TundraCode
+Comment=AI-powered code editor
+Exec=tundracode %U
+Icon=com.tundracode.dev
+Type=Application
+Categories=Development;IDE;
+Keywords=code;editor;ai;
+StartupNotify=true

@@ -1,0 +1,37 @@
+app-id: com.tundracode.dev
+runtime: org.gnome.Platform
+runtime-version: "46"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: tundracode
+
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --share=ipc
+  - --share=network
+  - --filesystem=home
+  - --filesystem=host
+  - --talk-name=org.freedesktop.secrets
+
+modules:
+  - name: tundracode
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/tundracode/cargo
+    build-commands:
+      - cargo build --release --offline
+      - install -Dm755 target/release/tundracode -t /app/bin/
+      - install -Dm644 packaging/flatpak/com.tundracode.dev.desktop /app/share/applications/com.tundracode.dev.desktop
+      - install -Dm644 packaging/flatpak/com.tundracode.dev.svg /app/share/icons/hicolor/scalable/apps/com.tundracode.dev.svg
+    sources:
+      - type: dir
+        path: ../..
+        dest: .
+      - type: file
+        path: cargo-sources.json
+        dest: .

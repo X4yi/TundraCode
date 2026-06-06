@@ -1,0 +1,27 @@
+[package]
+name = "tundracode-agents"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+description = "Agentes de IA para TundraCode (Plan, Build, Ask)"
+
+[dependencies]
+tundracode-core = { path = "../tundracode-core" }
+tundracode-tools = { path = "../tundracode-tools" }
+tundracode-models = { path = "../tundracode-models" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+chrono = "0.4"
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+mockall = { workspace = true }
