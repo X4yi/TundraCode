@@ -65,9 +65,9 @@ fn is_tundracode_path(path: &Path) -> bool {
     })
 }
 
-/// Applies a unified diff to the original text using the `similar` crate's
-/// hunk-aware patcher. Handles multi-op hunks, context lines, and tolerance
-/// to whitespace mismatches better than the previous line-by-line parser.
+
+
+
 fn apply_unified_diff(original: &str, diff: &str) -> Result<String, ToolError> {
     use similar::ChangeTag;
 
@@ -116,7 +116,7 @@ fn apply_unified_diff(original: &str, diff: &str) -> Result<String, ToolError> {
                 &mut current_new_idx,
                 &mut hunk_changes,
             )?;
-            // Parse "@@ -old_start[,old_count] +new_start[,new_count] @@"
+            
             let parts: Vec<&str> = hunk_header.split_whitespace().collect();
             if let Some(first) = parts.first() {
                 let old_start = first

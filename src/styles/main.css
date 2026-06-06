@@ -1694,7 +1694,7 @@ body.no-decorations #top-bar .tabs-container {
     -webkit-app-region: no-drag;
 }
 
-/* Keyring Warning Banner */
+
 .keyring-warning-banner {
     display: flex;
     align-items: center;
@@ -1712,7 +1712,7 @@ body.no-decorations #top-bar .tabs-container {
     flex-shrink: 0;
 }
 
-/* Free Models Status */
+
 .free-models-status {
     margin-bottom: var(--spacing-md);
     padding: var(--spacing-sm);
@@ -1762,7 +1762,7 @@ body.no-decorations #top-bar .tabs-container {
     color: var(--status-error);
 }
 
-/* Toast Notifications */
+
 .toast-success,
 .toast-warning {
     position: fixed;
@@ -1791,14 +1791,14 @@ body.no-decorations #top-bar .tabs-container {
     to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 
-/* Keyless Badge */
+
 .badge-keyless {
     background: rgba(88, 166, 255, 0.15);
     color: var(--accent-primary);
     border: 1px solid rgba(88, 166, 255, 0.3);
 }
 
-/* Plan Sections */
+
 .plan-section {
     margin-bottom: var(--spacing-md);
     padding: var(--spacing-md);
@@ -2011,7 +2011,7 @@ body.no-decorations #top-bar .tabs-container {
     word-break: break-all;
 }
 
-/* Editor modes (plan, diff) */
+
 .editor-mode {
     display: flex;
     flex-direction: column;
@@ -2135,7 +2135,7 @@ body.no-decorations #top-bar .tabs-container {
     background: var(--bg-tertiary);
 }
 
-/* Diff summary card in chat */
+
 .diff-summary-card {
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
@@ -2197,7 +2197,7 @@ body.no-decorations #top-bar .tabs-container {
     margin-left: auto;
 }
 
-/* Tool activity inline in chat */
+
 .tool-activity {
     display: inline-flex;
     align-items: center;
@@ -2247,7 +2247,7 @@ body.no-decorations #top-bar .tabs-container {
     font-size: 11px;
 }
 
-/* Chat streaming message */
+
 .chat-message.streaming::after {
     content: '▊';
     color: var(--accent-primary);
@@ -2258,7 +2258,7 @@ body.no-decorations #top-bar .tabs-container {
     50% { opacity: 0; }
 }
 
-/* Thinking indicator (chat) */
+
 .thinking-indicator {
     display: inline-flex;
     align-items: center;
@@ -2295,7 +2295,7 @@ body.no-decorations #top-bar .tabs-container {
 }
 
 
-/* ===== Provider List ===== */
+
 
 .provider-section {
     margin-bottom: var(--spacing-md);
@@ -2412,7 +2412,7 @@ body.no-decorations #top-bar .tabs-container {
     color: var(--bg-primary);
 }
 
-/* Connect Provider Button */
+
 
 .btn-connect-provider {
     display: flex;
@@ -2437,7 +2437,7 @@ body.no-decorations #top-bar .tabs-container {
     background: rgba(88, 166, 255, 0.05);
 }
 
-/* Connect Provider Modal */
+
 
 .connect-provider-modal {
     position: fixed;
@@ -2656,7 +2656,7 @@ body.no-decorations #top-bar .tabs-container {
     cursor: not-allowed;
 }
 
-/* Toast notifications */
+
 
 .toast-success,
 .toast-warning,

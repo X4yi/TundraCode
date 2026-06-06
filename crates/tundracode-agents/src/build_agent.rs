@@ -131,9 +131,9 @@ impl BuildAgent {
             .collect()
     }
 
-    /// Convierte las invocaciones reales de herramientas (con snapshots
-    /// `before`/`after` capturados en `fs_tools`) en `DiffProposal` con
-    /// unified diff generado por la crate `similar`. No hace string-grep.
+    
+    
+    
     fn proposals_from_invocations(
         &self,
         invocations: &[crate::agent::ToolInvocation],

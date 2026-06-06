@@ -2,6 +2,7 @@
 Cargo.lock
 .tundracode
 node_modules/
+scripts
 dist/
 *.log
 .DS_Store

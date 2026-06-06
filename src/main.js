@@ -1307,7 +1307,7 @@ async function loadConnectedProviderConfigs() {
                 }
             }
         } catch (e) {
-            // Provider not configured
+            
         }
     }
 }
