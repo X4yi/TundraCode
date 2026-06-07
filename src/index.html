@@ -36,7 +36,13 @@
 
     <div id="explore-dropdown" class="dropdown hidden">
         <div class="dropdown-header">
-            <span>Workspace</span>
+            <span id="explore-workspace-name">Workspace</span>
+            <button id="change-workspace-btn" class="btn-change-workspace" title="Change Workspace">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
+                    <path d="M3 3v5h5"></path>
+                </svg>
+            </button>
         </div>
         <div id="file-tree" class="file-tree">
         </div>
@@ -46,11 +52,22 @@
         <div id="editor-area" class="editor-area">
             <div id="editor-placeholder" class="editor-placeholder">
                 <p>Abre un archivo para comenzar a editar</p>
-                <p class="hint">Usa el boton Explore para navegar el workspace</p>
+                <p class="hint">Usa el botón Explore para navegar el workspace</p>
             </div>
             <div id="editor-content" class="editor-content hidden">
                 <div class="editor-line-numbers" id="line-numbers"></div>
-                <textarea id="code-editor" spellcheck="false"></textarea>
+                <div class="editor-highlights" aria-hidden="true">
+                    <pre class="highlights-pre"><code id="highlights-code" class="highlights-code"></code></pre>
+                </div>
+                <textarea id="code-editor" spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
+                <div id="md-preview-toggle" class="md-preview-toggle hidden">
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="md-preview-checkbox">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <span class="toggle-label">Preview</span>
+                </div>
+                <div id="md-preview-container" class="md-preview-container hidden"></div>
             </div>
             <div id="plan-mode" class="editor-mode hidden">
                 <div id="plan-mode-body" class="plan-mode-body"></div>
@@ -63,6 +80,13 @@
                 </div>
                 <div id="diff-mode-body" class="diff-mode-body"></div>
             </div>
+            <div id="plan-editor-view" class="editor-mode hidden">
+                <div class="plan-editor-header">
+                    <span id="plan-editor-title" class="plan-editor-title"></span>
+                    <button id="plan-editor-close" class="btn-small" onclick="closePlanView()">Close</button>
+                </div>
+                <div id="plan-editor-body" class="plan-editor-body"></div>
+            </div>
         </div>
 
         <div id="resize-handle" class="resize-handle"></div>
@@ -70,20 +94,103 @@
         <aside id="agents-panel" class="agents-panel">
             <div class="panel-header">
                 <span class="panel-title">Agent</span>
-                <div class="model-selector" style="position: relative;">
-                    <button class="model-selector-trigger" id="model-selector-btn">
-                        <span class="model-name" id="current-model-name">No model selected</span>
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <polyline points="6 15 12 9 18 15"></polyline>
-                        </svg>
-                    </button>
-                    <div class="model-dropdown hidden" id="model-dropdown"></div>
+                <div class="panel-header-actions">
+                    <div class="session-selector" style="position: relative;">
+                        <button class="session-selector-trigger" id="session-selector-btn" title="Sessions">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                <polyline points="14 2 14 8 20 8"></polyline>
+                            </svg>
+                        </button>
+                        <div class="session-dropdown hidden" id="session-dropdown">
+                            <div class="session-dropdown-header">
+                                <span>Sessions</span>
+                                <button id="session-new-btn" class="session-action-btn" title="New Session">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                                    </svg>
+                                </button>
+                            </div>
+                            <div id="session-list" class="session-list">
+                                <div class="session-empty">No saved sessions</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="model-selector" style="position: relative;">
+                        <button class="model-selector-trigger" id="model-selector-btn">
+                            <span class="model-name" id="current-model-name">No model selected</span>
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="6 15 12 9 18 15"></polyline>
+                            </svg>
+                        </button>
+                        <div class="model-dropdown hidden" id="model-dropdown"></div>
+                    </div>
+                    <div class="tool-log-toggle" style="position: relative;">
+                        <button class="tool-log-toggle-btn" id="tool-log-toggle-btn" title="Toggle Tool Log" onclick="toggleToolLog()">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                <polyline points="14 2 14 8 20 8"></polyline>
+                                <line x1="16" y1="13" x2="8" y2="13"></line>
+                                <line x1="16" y1="17" x2="8" y2="17"></line>
+                                <polyline points="10 9 9 9 8 9"></polyline>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="reasoning-selector">
+                        <select id="reasoning-effort" title="Reasoning effort">
+                            <option value="none">None</option>
+                            <option value="low">Low</option>
+                            <option value="medium" selected>Medium</option>
+                            <option value="high">High</option>
+                        </select>
+                    </div>
                 </div>
             </div>
 
             <div class="panel-content">
-                <div class="agent-chat-main">
-                    <div id="chat-messages" class="chat-messages"></div>
+                <div class="agent-main-horizontal">
+                    <div class="agent-chat-main">
+                        <div id="chat-messages" class="chat-messages"></div>
+                    </div>
+                    <div id="tool-log-resize-handle" class="tool-log-resize-handle"></div>
+                    <div id="tool-log-subpanel" class="tool-log-subpanel collapsed">
+                        <div class="tool-log-header" onclick="toggleToolLog()">
+                            <div class="tool-log-title">
+                                <svg class="tool-log-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="6 9 12 15 18 9"></polyline>
+                                </svg>
+                                <span>Tool Log</span>
+                            </div>
+                            <div class="tool-log-stats">
+                                <div class="tool-log-stat">
+                                    <span class="tool-log-stat-label">In:</span>
+                                    <span id="token-input" class="tool-log-stat-value">0</span>
+                                </div>
+                                <div class="tool-log-stat">
+                                    <span class="tool-log-stat-label">Out:</span>
+                                    <span id="token-output" class="tool-log-stat-value">0</span>
+                                </div>
+                                <div class="tool-log-stat">
+                                    <span class="tool-log-stat-label">Total:</span>
+                                    <span id="token-total" class="tool-log-stat-value">0</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="tool-log-content">
+                            <div id="tool-log-empty" class="tool-log-empty">
+                                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                    <polyline points="14 2 14 8 20 8"></polyline>
+                                    <line x1="16" y1="13" x2="8" y2="13"></line>
+                                    <line x1="16" y1="17" x2="8" y2="17"></line>
+                                    <polyline points="10 9 9 9 8 9"></polyline>
+                                </svg>
+                                <span>No tool calls yet</span>
+                            </div>
+                            <div id="tool-log-entries" class="tool-log-entries"></div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -175,6 +282,7 @@
 
     <script src="utils/marked.min.js"></script>
     <script src="utils/icons.js"></script>
+    <script type="module" src="utils/syntax.js"></script>
     <script src="main.js"></script>
 </body>
 </html>

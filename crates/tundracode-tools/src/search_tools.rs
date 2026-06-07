@@ -72,7 +72,8 @@ impl Tool for SearchCodebaseTool {
                 output: String::new(),
                 error: Some(format!("ripgrep error: {}", stderr)),
                 prior_content: None,
-                file_path: None,
+                resulting_content: None,
+            file_path: None,
             });
         }
 
@@ -82,7 +83,8 @@ impl Tool for SearchCodebaseTool {
                 output: format!("No results for '{}'", query),
                 error: None,
                 prior_content: None,
-                file_path: None,
+                resulting_content: None,
+            file_path: None,
             });
         }
 
@@ -111,7 +113,8 @@ impl Tool for SearchCodebaseTool {
                 output: format!("No structured results for '{}'", query),
                 error: None,
                 prior_content: None,
-                file_path: None,
+                resulting_content: None,
+            file_path: None,
             })
         } else {
             Ok(ToolResult {
@@ -119,7 +122,8 @@ impl Tool for SearchCodebaseTool {
                 output: results.join("\n"),
                 error: None,
                 prior_content: None,
-                file_path: None,
+                resulting_content: None,
+            file_path: None,
             })
         }
     }
@@ -174,7 +178,8 @@ impl Tool for SearchInWebTool {
                 output: String::new(),
                 error: Some(format!("Search returned status: {}", status)),
                 prior_content: None,
-                file_path: None,
+                resulting_content: None,
+            file_path: None,
             });
         }
 
@@ -191,7 +196,8 @@ impl Tool for SearchInWebTool {
                 output: format!("No web results for '{}'", query),
                 error: None,
                 prior_content: None,
-                file_path: None,
+                resulting_content: None,
+            file_path: None,
             })
         } else {
             let formatted = results
@@ -205,7 +211,8 @@ impl Tool for SearchInWebTool {
                 output: formatted,
                 error: None,
                 prior_content: None,
-                file_path: None,
+                resulting_content: None,
+            file_path: None,
             })
         }
     }

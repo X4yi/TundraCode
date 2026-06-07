@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use tracing::info;
 
 use crate::{
-    CreateFileTool, DeleteFileTool, GetDiagnosticsTool, GetWorkspaceTool, ListDirectoryTool,
-    ReadFileTool, RunCommandTool, SearchCodebaseTool, SearchInWebTool, Tool, ToolResult,
-    WriteFileTool,
+    ApplyPatchTool, CreateFileTool, DeleteFileTool, GetDiagnosticsTool, GetWorkspaceTool,
+    ListDirectoryTool, ReadFileTool, RunCommandTool, SearchCodebaseTool, SearchInWebTool, Tool,
+    ToolResult, WriteFileTool,
 };
 
 pub struct ToolRegistry {
@@ -48,6 +48,7 @@ impl ToolRegistry {
         self.register(Box::new(SearchCodebaseTool));
         self.register(Box::new(SearchInWebTool));
         self.register(Box::new(GetDiagnosticsTool));
+        self.register(Box::new(ApplyPatchTool));
     }
 
     pub fn register_subset(&mut self, names: &[&str]) {
@@ -63,6 +64,7 @@ impl ToolRegistry {
                 "SearchCodebase" => self.register(Box::new(SearchCodebaseTool)),
                 "SearchInWeb" => self.register(Box::new(SearchInWebTool)),
                 "GetDiagnostics" => self.register(Box::new(GetDiagnosticsTool)),
+                "ApplyPatch" => self.register(Box::new(ApplyPatchTool)),
                 _ => {}
             }
         }

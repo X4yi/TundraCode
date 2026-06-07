@@ -47,12 +47,21 @@ impl Tool for ApplyPatchTool {
 
         let new_content = apply_unified_diff(&original, diff)?;
 
+        if context.dry_run {
+            return Ok(
+                ToolResult::ok(format!("Patch applied to {} (dry-run)", path))
+                    .with_prior(Some(original), Some(path.to_string()))
+                    .with_resulting_content(Some(new_content)),
+            );
+        }
+
         tokio::fs::write(&full_path, &new_content)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Cannot write file: {}", e)))?;
 
         Ok(ToolResult::ok(format!("Patch applied to {}", path))
-            .with_prior(Some(original), Some(path.to_string())))
+            .with_prior(Some(original), Some(path.to_string()))
+            .with_resulting_content(Some(new_content)))
     }
 }
 

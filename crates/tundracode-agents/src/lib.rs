@@ -6,7 +6,7 @@ pub mod plan_agent;
 pub mod r#loop;
 
 pub use agent::{
-    Agent, AgentContext, AgentInput, AgentOutput, AgentRunner, DiffKind, DiffProposal,
+    Agent, AgentContext, AgentInput, AgentOutput, DiffKind, DiffProposal,
     ToolInvocation,
 };
 pub use ask_agent::AskAgent;

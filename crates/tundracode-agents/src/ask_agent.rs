@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use tundracode_models::{ProviderRegistry, ToolDefinition};
+use tundracode_models::{ProviderRegistry, StreamEvent, ToolDefinition};
 use tundracode_tools::ToolRegistry;
 
 use crate::agent::{Agent, AgentContext, AgentInput, AgentOutput};
@@ -30,9 +30,8 @@ impl Agent for AskAgent {
 - Usa ReadFile para contexto especifico de archivos.
 - Usa SearchCodebase para patrones amplios (donde se usa X, que implementa Y).
 - Usa SearchInWeb solo cuando el codigo no tiene la respuesta.
-- Justifica por que usas cada herramienta.
 
-## Flujo de Trabajo
+## Flujo
 1. Entiende la pregunta del usuario.
 2. Busca evidencia en el codigo fuente.
 3. Si es necesario, investiga externamente.
@@ -49,7 +48,7 @@ impl Agent for AskAgent {
 - Si no encuentras informacion, di "No encontre evidencia en el codigo".
 - Si la pregunta es ambigua, pide clarificacion.
 - Si hay archivos abiertos, referencialos cuando sea relevante.
-- Si la respuesta requiere investigacion externa, indica que la buscaste."#
+- Si la respuesta requiere investigacion externa, indica que la buscaste y donde."#
             .to_string()
     }
 
@@ -65,11 +64,14 @@ impl Agent for AskAgent {
         let tool_context = tundracode_tools::ToolContext {
             workspace_path: context.workspace_path.clone(),
             agent_id: "ask".to_string(),
+            dry_run: true,
         };
 
         let tools = self.build_tool_definitions(&tool_registry);
 
-        let agent_loop = AgentLoop::new();
+        let agent_loop = AgentLoop::new()
+            .with_max_iterations(20)
+            .with_budget_tokens(u32::MAX);
         let run_config = crate::r#loop::RunConfig {
             provider_registry: &provider_registry,
             tool_registry: &tool_registry,
@@ -79,6 +81,8 @@ impl Agent for AskAgent {
             system_prompt: &self.system_prompt(),
             user_message: &input.user_message,
             tools: &tools,
+            reasoning_effort: context.reasoning_effort.clone(),
+            on_event: None,
         };
         let RunOutput {
             content,
@@ -94,6 +98,51 @@ impl Agent for AskAgent {
 }
 
 impl AskAgent {
+    pub async fn run_with_streaming(
+        &self,
+        context: &AgentContext,
+        input: AgentInput,
+        on_event: Option<Box<dyn FnMut(StreamEvent) + Send>>,
+    ) -> anyhow::Result<AgentOutput> {
+        let provider_registry = ProviderRegistry::new();
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register_subset(&self.allowed_tools());
+
+        let tool_context = tundracode_tools::ToolContext {
+            workspace_path: context.workspace_path.clone(),
+            agent_id: "ask".to_string(),
+            dry_run: true,
+        };
+
+        let tools = self.build_tool_definitions(&tool_registry);
+
+        let agent_loop = AgentLoop::new()
+            .with_max_iterations(20)
+            .with_budget_tokens(u32::MAX);
+        let run_config = crate::r#loop::RunConfig {
+            provider_registry: &provider_registry,
+            tool_registry: &tool_registry,
+            tool_context: &tool_context,
+            provider_id: &context.model_config.provider,
+            model_config: &context.model_config,
+            system_prompt: &self.system_prompt(),
+            user_message: &input.user_message,
+            tools: &tools,
+            reasoning_effort: context.reasoning_effort.clone(),
+            on_event,
+        };
+        let RunOutput {
+            content,
+            invocations: _,
+            tokens_used,
+        } = agent_loop.run(run_config).await?;
+
+        Ok(AgentOutput::FinalAnswer {
+            content,
+            tokens_used,
+        })
+    }
+
     fn build_tool_definitions(&self, registry: &ToolRegistry) -> Vec<ToolDefinition> {
         self.allowed_tools()
             .iter()

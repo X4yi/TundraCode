@@ -9,7 +9,7 @@ pub mod tool_format;
 pub use conversation::{Conversation, Message, MessageRole, ToolCallPayload};
 pub use provider::{
     get_all_providers, get_provider_by_id, CompletionRequest, CompletionResponse, ModelConfig,
-    ModelProvider, ProviderInfo, ProviderModel,
+    ModelProvider, ProviderInfo, ProviderModel, StreamEvent,
 };
 pub use providers::ProviderRegistry;
 pub use tool_format::{ToolCall, ToolDefinition, ToolResultContent};

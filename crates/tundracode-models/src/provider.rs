@@ -1,5 +1,18 @@
 use serde::{Deserialize, Serialize};
 
+use crate::tool_format::{ToolCall, ToolDefinition};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StreamEvent {
+    Token(String),
+    ReasoningToken(String),
+    ToolCallStart { name: String, call_id: String, file_path: Option<String> },
+    ToolCallDelta { call_id: String, arguments_delta: String },
+    ToolCallEnd { call_id: String, file_path: Option<String> },
+    Done(CompletionResponse),
+    Error(String),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderCategory {
@@ -15,8 +28,6 @@ pub struct ModelConfig {
     pub model: String,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
-    pub temperature: f32,
-    pub max_tokens: u32,
 }
 
 impl Default for ModelConfig {
@@ -26,8 +37,6 @@ impl Default for ModelConfig {
             model: "gpt-4".to_string(),
             api_key: None,
             base_url: None,
-            temperature: 0.7,
-            max_tokens: 4096,
         }
     }
 }
@@ -205,19 +214,28 @@ pub trait ModelProvider: Send + Sync {
         &self,
         config: &ModelConfig,
         request: CompletionRequest,
-        tools: Option<&[crate::tool_format::ToolDefinition]>,
+        tools: Option<&[ToolDefinition]>,
     ) -> anyhow::Result<(
         CompletionResponse,
-        Option<Vec<crate::tool_format::ToolCall>>,
+        Option<Vec<ToolCall>>,
     )>;
+
+    async fn stream(
+        &self,
+        config: &ModelConfig,
+        request: CompletionRequest,
+        tools: Option<&[ToolDefinition]>,
+        _on_event: &mut (dyn FnMut(StreamEvent) + Send),
+    ) -> anyhow::Result<(CompletionResponse, Option<Vec<ToolCall>>)> {
+        self.complete(config, request, tools).await
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionRequest {
     pub conversation: crate::conversation::Conversation,
     pub system_prompt: Option<String>,
-    pub temperature: f32,
-    pub max_tokens: u32,
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

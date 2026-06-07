@@ -6,6 +6,7 @@ use serde_json::Value;
 pub struct ToolContext {
     pub workspace_path: String,
     pub agent_id: String,
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,6 +15,7 @@ pub struct ToolResult {
     pub output: String,
     pub error: Option<String>,
     pub prior_content: Option<String>,
+    pub resulting_content: Option<String>,
     pub file_path: Option<String>,
 }
 
@@ -34,6 +36,7 @@ impl ToolResult {
             output: output.into(),
             error: None,
             prior_content: None,
+            resulting_content: None,
             file_path: None,
         }
     }
@@ -44,6 +47,7 @@ impl ToolResult {
             output: String::new(),
             error: Some(error.into()),
             prior_content: None,
+            resulting_content: None,
             file_path: None,
         }
     }
@@ -51,6 +55,11 @@ impl ToolResult {
     pub fn with_prior(mut self, prior: Option<String>, path: Option<String>) -> Self {
         self.prior_content = prior;
         self.file_path = path;
+        self
+    }
+
+    pub fn with_resulting_content(mut self, content: Option<String>) -> Self {
+        self.resulting_content = content;
         self
     }
 }

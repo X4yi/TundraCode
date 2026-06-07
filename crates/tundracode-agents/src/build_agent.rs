@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use tundracode_models::{ProviderRegistry, ToolDefinition};
+use tundracode_models::{ProviderRegistry, StreamEvent, ToolDefinition};
 use tundracode_tools::{generate_unified_diff, ToolRegistry};
 
 use crate::agent::{Agent, AgentContext, AgentInput, AgentOutput, DiffKind, DiffProposal};
@@ -14,45 +14,49 @@ impl Agent for BuildAgent {
     }
 
     fn system_prompt(&self) -> String {
-        r#"Eres el agente Build de TundraCode. Implementas planes mediante herramientas auditables.
+        r#"Eres el agente Build de TundraCode. Implementas un plan leyendo y modificando archivos.
 
-## Herramientas
-- Usa ApplyPatch para cambios incrementales en archivos existentes.
-- Usa CreateFile para archivos nuevos.
-- Usa ReadFile para entender contexto antes de modificar.
-- Usa RunCommand para compilar, testear y verificar.
-- Usa GetDiagnostics para detectar errores.
+## Herramientas Disponibles
+- **ReadFile**: Lee archivos existentes para entender contexto.
+- **ApplyPatch**: Aplica cambios quirurgicos en archivos existentes (unified diff).
+- **CreateFile**: Crea archivos nuevos.
+- **WriteFile**: Sobreescribe un archivo completo (usar solo como ultimo recurso).
+- **ListDirectory**: Explora estructura de directorios.
+- **RunCommand**: Compila, testea y verifica cambios.
+- **GetDiagnostics**: Detecta errores de compilacion.
+
+## Flujo Obligatorio por Task
+1. **LEE** el goal del task actual y los archivos relevantes.
+2. **PLANIFICA** los cambios exactos antes de ejecutar.
+3. **EJECUTA** cambios con ApplyPatch (existentes) o CreateFile (nuevos).
+4. **VERIFICA** con RunCommand (compile/test) y GetDiagnostics.
+5. Si hay errores, **ANALIZA** y **REPARA** (max 3 intentos).
+6. Avanza al siguiente task.
 
 ## Reglas Fundamentales
-1. **PROHIBICION ABSOLUTA**: Nunca modifiques archivos en .tundracode/.
-2. **Verificacion Obligatoria**: Despues de cada cambio, verifica compilacion y tests.
-3. **Cambios Atomicos**: Mantene cambios pequenos y enfocados. Un cambio = una tarea.
-4. **Diffs Claros**: Cada cambio debe generar un diff que el usuario pueda revisar.
+1. **UN TASK A LA VEZ**: No saltes a otro task hasta completar el actual.
+2. **SIEMPRE LEE ANTES DE MODIFICAR**: Nunca modifiques un archivo sin leerlo primero.
+3. **PROHIBICION ABSOLUTA**: Nunca modifiques archivos en .tundracode/.
+4. **CAMBIOS ATOMICOS**: Un task = un cambio pequeno y enfocado.
+5. **VERIFICACION**: Despues de cada cambio, compila y verifica.
+6. **MAXIMO 3 INTENTOS**: Si un task falla 3 veces, detente y reporta el error.
 
 ## Manejo de Errores
-- Si un comando falla, **analiza el error** antes de reintentar.
-- Maximo 3 intentos para el mismo error → detente y reporta.
-- Si un cambio rompe algo, **revierte** antes de continuar.
+- Si un comando falla, analiza el error antes de reintentar.
+- Si un cambio rompe algo, revierte antes de continuar.
 - Captura stack traces para debugging.
 
 ## Calidad del Codigo
 - Respeta convenciones existentes del proyecto.
 - No introduzcas dependencias nuevas sin justificacion.
 - Usa nombres descriptivos, evita magic numbers.
-- Funciones pequenas y enfocadas (<50 lineas ideal).
+- Funciones pequenas y enfocadas.
 
 ## Tool Calling
-- Usa las herramientas de forma secuencial y deliberada.
-- Justifica cada uso de herramienta: por que esta y no otra.
+- Usa herramientas de forma secuencial y deliberada.
+- Justifica cada uso de herramienta.
 - Verifica resultados antes de continuar.
-- Si una herramienta falla, busca alternativa o reporta.
-
-## Flujo de Trabajo
-1. Entiende el contexto completo (lee archivos relevantes).
-2. Planifica los cambios antes de ejecutar.
-3. Implementa cambios atomicos uno por uno.
-4. Verifica cada cambio (compilacion, tests).
-5. Reporta resultado final con resumen de cambios."#
+- Si una herramienta falla, busca alternativa o reporta."#
             .to_string()
     }
 
@@ -77,6 +81,7 @@ impl Agent for BuildAgent {
         let tool_context = tundracode_tools::ToolContext {
             workspace_path: context.workspace_path.clone(),
             agent_id: "build".to_string(),
+            dry_run: !context.autonomous_mode,
         };
 
         let tools = self.build_tool_definitions(&tool_registry);
@@ -90,7 +95,9 @@ impl Agent for BuildAgent {
             input.user_message.clone()
         };
 
-        let agent_loop = AgentLoop::new();
+        let agent_loop = AgentLoop::new()
+            .with_max_iterations(30)
+            .with_budget_tokens(u32::MAX);
         let run_config = crate::r#loop::RunConfig {
             provider_registry: &provider_registry,
             tool_registry: &tool_registry,
@@ -100,11 +107,13 @@ impl Agent for BuildAgent {
             system_prompt: &self.system_prompt(),
             user_message: &user_message,
             tools: &tools,
+            reasoning_effort: context.reasoning_effort.clone(),
+            on_event: None,
         };
         let RunOutput {
             content: _,
             invocations,
-            tokens_used: _,
+            tokens_used,
         } = agent_loop.run(run_config).await?;
 
         let (proposals, tool_log) = self.proposals_from_invocations(&invocations)?;
@@ -113,11 +122,70 @@ impl Agent for BuildAgent {
             proposals,
             invocations,
             tool_log,
+            tokens_used,
         })
     }
 }
 
 impl BuildAgent {
+    pub async fn run_with_streaming(
+        &self,
+        context: &AgentContext,
+        input: AgentInput,
+        on_event: Option<Box<dyn FnMut(StreamEvent) + Send>>,
+    ) -> anyhow::Result<AgentOutput> {
+        let provider_registry = ProviderRegistry::new();
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register_subset(&self.allowed_tools());
+
+        let tool_context = tundracode_tools::ToolContext {
+            workspace_path: context.workspace_path.clone(),
+            agent_id: "build".to_string(),
+            dry_run: !context.autonomous_mode,
+        };
+
+        let tools = self.build_tool_definitions(&tool_registry);
+
+        let user_message = if let Some(annotations) = &input.plan_annotations {
+            format!(
+                "Plan a implementar:\n{}\n\nAnotaciones del usuario:\n{}",
+                input.user_message, annotations
+            )
+        } else {
+            input.user_message.clone()
+        };
+
+        let agent_loop = AgentLoop::new()
+            .with_max_iterations(30)
+            .with_budget_tokens(u32::MAX);
+        let run_config = crate::r#loop::RunConfig {
+            provider_registry: &provider_registry,
+            tool_registry: &tool_registry,
+            tool_context: &tool_context,
+            provider_id: &context.model_config.provider,
+            model_config: &context.model_config,
+            system_prompt: &self.system_prompt(),
+            user_message: &user_message,
+            tools: &tools,
+            reasoning_effort: context.reasoning_effort.clone(),
+            on_event,
+        };
+        let RunOutput {
+            content: _,
+            invocations,
+            tokens_used,
+        } = agent_loop.run(run_config).await?;
+
+        let (proposals, tool_log) = self.proposals_from_invocations(&invocations)?;
+
+        Ok(AgentOutput::ProposedChanges {
+            proposals,
+            invocations,
+            tool_log,
+            tokens_used,
+        })
+    }
+
     fn build_tool_definitions(&self, registry: &ToolRegistry) -> Vec<ToolDefinition> {
         self.allowed_tools()
             .iter()

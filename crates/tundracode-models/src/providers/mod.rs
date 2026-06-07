@@ -2,13 +2,27 @@ use anyhow::Result;
 use reqwest::Client;
 use std::collections::HashMap;
 
-use crate::provider::{CompletionRequest, CompletionResponse, ModelConfig, ModelProvider};
+use crate::provider::{CompletionRequest, CompletionResponse, ModelConfig, ModelProvider, StreamEvent};
 use crate::tool_format::{ToolCall, ToolDefinition};
 
 pub mod anthropic;
 pub mod google;
 pub mod ollama;
 pub mod openai_compat;
+
+fn new_client_for_complete() -> Result<Client> {
+    Ok(Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?)
+}
+
+fn new_client_for_stream() -> Result<Client> {
+    Ok(Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(1800))
+        .build()?)
+}
 
 pub struct ProviderRegistry {
     providers: HashMap<String, Box<dyn ModelProvider>>,
@@ -18,7 +32,7 @@ pub struct ProviderRegistry {
 impl ProviderRegistry {
     pub fn new() -> Self {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .connect_timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("Failed to create HTTP client");
 
@@ -112,15 +126,38 @@ impl ModelProvider for OpenAiCompatProviderWrapper {
         let is_keyless = self.is_keyless();
 
         openai_compat::OpenAiCompatProvider::complete(
-            &Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()?,
+            &new_client_for_complete()?,
             base_url,
             api_key,
             &config.model,
             &request,
             tools,
             is_keyless,
+        )
+        .await
+    }
+
+    async fn stream(
+        &self,
+        config: &ModelConfig,
+        request: CompletionRequest,
+        tools: Option<&[ToolDefinition]>,
+        on_event: &mut (dyn FnMut(StreamEvent) + Send),
+    ) -> Result<(CompletionResponse, Option<Vec<ToolCall>>)> {
+        let api_key = config.api_key.as_deref();
+        let default_url = self.default_base_url();
+        let base_url = config.base_url.as_deref().unwrap_or(&default_url);
+        let is_keyless = self.is_keyless();
+
+        openai_compat::OpenAiCompatProvider::stream(
+            &new_client_for_stream()?,
+            base_url,
+            api_key,
+            &config.model,
+            &request,
+            tools,
+            is_keyless,
+            on_event,
         )
         .await
     }
@@ -165,14 +202,37 @@ impl ModelProvider for AnthropicProviderWrapper {
             .unwrap_or("https://api.anthropic.com");
 
         anthropic::AnthropicProvider::complete(
-            &Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()?,
+            &new_client_for_complete()?,
             base_url,
             api_key,
             &config.model,
             &request,
             tools,
+        )
+        .await
+    }
+
+    async fn stream(
+        &self,
+        config: &ModelConfig,
+        request: CompletionRequest,
+        tools: Option<&[ToolDefinition]>,
+        on_event: &mut (dyn FnMut(StreamEvent) + Send),
+    ) -> Result<(CompletionResponse, Option<Vec<ToolCall>>)> {
+        let api_key = config.api_key.as_deref();
+        let base_url = config
+            .base_url
+            .as_deref()
+            .unwrap_or("https://api.anthropic.com");
+
+        anthropic::AnthropicProvider::stream(
+            &new_client_for_stream()?,
+            base_url,
+            api_key,
+            &config.model,
+            &request,
+            tools,
+            on_event,
         )
         .await
     }
@@ -199,14 +259,37 @@ impl ModelProvider for GoogleProviderWrapper {
             .unwrap_or("https://generativelanguage.googleapis.com");
 
         google::GoogleProvider::complete(
-            &Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()?,
+            &new_client_for_complete()?,
             base_url,
             api_key,
             &config.model,
             &request,
             tools,
+        )
+        .await
+    }
+
+    async fn stream(
+        &self,
+        config: &ModelConfig,
+        request: CompletionRequest,
+        tools: Option<&[ToolDefinition]>,
+        on_event: &mut (dyn FnMut(StreamEvent) + Send),
+    ) -> Result<(CompletionResponse, Option<Vec<ToolCall>>)> {
+        let api_key = config.api_key.as_deref();
+        let base_url = config
+            .base_url
+            .as_deref()
+            .unwrap_or("https://generativelanguage.googleapis.com");
+
+        google::GoogleProvider::stream(
+            &new_client_for_stream()?,
+            base_url,
+            api_key,
+            &config.model,
+            &request,
+            tools,
+            on_event,
         )
         .await
     }
@@ -237,13 +320,34 @@ impl ModelProvider for OllamaProviderWrapper {
             .unwrap_or("http://localhost:11434");
 
         ollama::OllamaProvider::complete(
-            &Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()?,
+            &new_client_for_complete()?,
             base_url,
             &config.model,
             &request,
             tools,
+        )
+        .await
+    }
+
+    async fn stream(
+        &self,
+        config: &ModelConfig,
+        request: CompletionRequest,
+        tools: Option<&[ToolDefinition]>,
+        on_event: &mut (dyn FnMut(StreamEvent) + Send),
+    ) -> Result<(CompletionResponse, Option<Vec<ToolCall>>)> {
+        let base_url = config
+            .base_url
+            .as_deref()
+            .unwrap_or("http://localhost:11434");
+
+        ollama::OllamaProvider::stream(
+            &new_client_for_stream()?,
+            base_url,
+            &config.model,
+            &request,
+            tools,
+            on_event,
         )
         .await
     }

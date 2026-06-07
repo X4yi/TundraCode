@@ -1,7 +1,10 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use anyhow::Result;
 use tundracode_models::{
-    CompletionRequest, Conversation, MessageRole, ModelConfig, ProviderRegistry, ToolCallPayload,
-    ToolDefinition,
+    CompletionRequest, Conversation, MessageRole, ModelConfig, ProviderRegistry, StreamEvent,
+    ToolCallPayload, ToolDefinition,
 };
 use tundracode_tools::{ToolContext, ToolRegistry};
 
@@ -9,6 +12,8 @@ use crate::agent::ToolInvocation;
 
 pub struct AgentLoop {
     max_iterations: usize,
+    cancel_flag: Option<Arc<AtomicBool>>,
+    budget_tokens: Option<u32>,
 }
 
 pub struct RunConfig<'a> {
@@ -20,6 +25,8 @@ pub struct RunConfig<'a> {
     pub system_prompt: &'a str,
     pub user_message: &'a str,
     pub tools: &'a [ToolDefinition],
+    pub reasoning_effort: Option<String>,
+    pub on_event: Option<Box<dyn FnMut(StreamEvent) + Send>>,
 }
 
 pub struct RunOutput {
@@ -30,7 +37,11 @@ pub struct RunOutput {
 
 impl AgentLoop {
     pub fn new() -> Self {
-        Self { max_iterations: 8 }
+        Self {
+            max_iterations: 8,
+            cancel_flag: None,
+            budget_tokens: None,
+        }
     }
 
     pub fn with_max_iterations(mut self, max: usize) -> Self {
@@ -38,7 +49,17 @@ impl AgentLoop {
         self
     }
 
-    pub async fn run(&self, config: RunConfig<'_>) -> Result<RunOutput> {
+    pub fn with_cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancel_flag = Some(flag);
+        self
+    }
+
+    pub fn with_budget_tokens(mut self, budget: u32) -> Self {
+        self.budget_tokens = Some(budget);
+        self
+    }
+
+    pub async fn run(&self, mut config: RunConfig<'_>) -> Result<RunOutput> {
         let mut conversation = Conversation::new();
         conversation.add_message(MessageRole::User, config.user_message.to_string());
 
@@ -46,11 +67,33 @@ impl AgentLoop {
         let mut total_tokens: u32 = 0;
 
         for _iteration in 0..self.max_iterations {
+            if let Some(flag) = &self.cancel_flag {
+                if flag.load(Ordering::Relaxed) {
+                    return Ok(RunOutput {
+                        content: "Agent cancelled".to_string(),
+                        invocations,
+                        tokens_used: total_tokens,
+                    });
+                }
+            }
+
+            if let Some(budget) = self.budget_tokens {
+                if total_tokens >= budget {
+                    return Ok(RunOutput {
+                        content: format!(
+                            "Agent reached token budget limit ({}/{})",
+                            total_tokens, budget
+                        ),
+                        invocations,
+                        tokens_used: total_tokens,
+                    });
+                }
+            }
+
             let request = CompletionRequest {
                 conversation: conversation.clone(),
                 system_prompt: Some(config.system_prompt.to_string()),
-                temperature: config.model_config.temperature,
-                max_tokens: config.model_config.max_tokens,
+                reasoning_effort: config.reasoning_effort.clone(),
             };
 
             let tools_for_call = if config.tools.is_empty() {
@@ -59,14 +102,131 @@ impl AgentLoop {
                 Some(config.tools)
             };
 
-            let (response, tool_calls) = config
+            let provider = config
                 .provider_registry
                 .get(config.provider_id)
-                .ok_or_else(|| anyhow::anyhow!("Provider not found: {}", config.provider_id))?
-                .complete(config.model_config, request, tools_for_call)
-                .await?;
+                .ok_or_else(|| anyhow::anyhow!("Provider not found: {}", config.provider_id))?;
 
-            total_tokens += response.tokens_used;
+            let (response, tool_calls) = if let Some(ref mut on_event) = config.on_event {
+                let mut content_buf = String::new();
+                let mut tool_calls_buf: Vec<tundracode_models::ToolCall> = Vec::new();
+
+                let result = provider
+                    .stream(
+                        config.model_config,
+                        request,
+                        tools_for_call,
+                        &mut |event| match event {
+                            StreamEvent::Token(t) => {
+                                content_buf.push_str(&t);
+                                on_event(StreamEvent::Token(t));
+                            }
+                            StreamEvent::ReasoningToken(t) => {
+                                on_event(StreamEvent::ReasoningToken(t));
+                            }
+                            StreamEvent::ToolCallStart { name, call_id, file_path } => {
+                                tool_calls_buf.push(tundracode_models::ToolCall {
+                                    id: call_id.clone(),
+                                    name: name.clone(),
+                                    arguments: serde_json::Value::Object(
+                                        serde_json::Map::new(),
+                                    ),
+                                });
+                                on_event(StreamEvent::ToolCallStart { name, call_id, file_path });
+                            }
+                            StreamEvent::ToolCallDelta {
+                                call_id,
+                                arguments_delta,
+                            } => {
+                                if let Some(tc) =
+                                    tool_calls_buf.iter_mut().find(|tc| tc.id == call_id)
+                                {
+                                    if let Some(obj) = tc.arguments.as_object_mut() {
+                                        if let Some(raw) = obj.get_mut("_raw") {
+                                            if let Some(s) = raw.as_str() {
+                                                *raw = serde_json::Value::String(
+                                                    s.to_string() + &arguments_delta,
+                                                );
+                                            }
+                                        } else {
+                                            obj.insert(
+                                                "_raw".to_string(),
+                                                serde_json::Value::String(arguments_delta.clone()),
+                                            );
+                                        }
+                                    }
+                                }
+                                on_event(StreamEvent::ToolCallDelta {
+                                    call_id,
+                                    arguments_delta,
+                                });
+                            }
+                            StreamEvent::ToolCallEnd { call_id, mut file_path } => {
+                                if let Some(tc) =
+                                    tool_calls_buf.iter_mut().find(|tc| tc.id == call_id)
+                                {
+                                    if let Some(obj) = tc.arguments.as_object_mut() {
+                                        if let Some(raw) = obj.remove("_raw") {
+                                            if let Some(s) = raw.as_str() {
+                                                if let Ok(parsed) =
+                                                    serde_json::from_str::<serde_json::Value>(s)
+                                                {
+                                                    if let Some(parsed_obj) = parsed.as_object() {
+                                                        // Extract file_path from arguments
+                                                        if let Some(path_val) = parsed_obj.get("path") {
+                                                            if let Some(path_str) = path_val.as_str() {
+                                                                file_path = Some(path_str.to_string());
+                                                            }
+                                                        }
+                                                        tc.arguments = serde_json::Value::Object(
+                                                            parsed_obj.clone(),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                on_event(StreamEvent::ToolCallEnd { call_id, file_path });
+                            }
+                            StreamEvent::Done(resp) => {
+                                total_tokens += resp.tokens_used;
+                                on_event(StreamEvent::Done(resp.clone()));
+                            }
+                            StreamEvent::Error(e) => {
+                                on_event(StreamEvent::Error(e.clone()));
+                            }
+                        },
+                    )
+                    .await?;
+
+                let final_content = if content_buf.is_empty() {
+                    result.0.content
+                } else {
+                    content_buf
+                };
+
+                (
+                    tundracode_models::CompletionResponse {
+                        content: final_content,
+                        tokens_used: result.0.tokens_used,
+                        finish_reason: result.0.finish_reason,
+                    },
+                    if tool_calls_buf.is_empty() {
+                        result.1
+                    } else {
+                        Some(tool_calls_buf)
+                    },
+                )
+            } else {
+                provider
+                    .complete(config.model_config, request, tools_for_call)
+                    .await?
+            };
+
+            if config.on_event.is_none() {
+                total_tokens += response.tokens_used;
+            }
 
             if let Some(calls) = tool_calls {
                 if !calls.is_empty() {
@@ -80,24 +240,43 @@ impl AgentLoop {
                             .execute(config.tool_context, &call.name, call.arguments.clone())
                             .await;
 
-                        let (success, output, error, prior, file_path) = match result {
-                            Ok(r) => (r.success, r.output, r.error, r.prior_content, r.file_path),
-                            Err(e) => (false, String::new(), Some(e.to_string()), None, None),
+                        let (success, output, error, prior, resulting, file_path) = match result {
+                            Ok(r) => (
+                                r.success,
+                                r.output,
+                                r.error,
+                                r.prior_content,
+                                r.resulting_content,
+                                r.file_path,
+                            ),
+                            Err(e) => (
+                                false,
+                                String::new(),
+                                Some(e.to_string()),
+                                None,
+                                None,
+                                None,
+                            ),
                         };
 
                         let after = if success {
-                            let path = file_path.clone().or_else(|| {
-                                call.arguments
-                                    .get("path")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string())
-                            });
-                            if let Some(p) = path.as_deref() {
-                                let full = std::path::Path::new(&config.tool_context.workspace_path)
-                                    .join(p);
-                                std::fs::read_to_string(&full).ok()
+                            if let Some(content) = resulting {
+                                Some(content)
                             } else {
-                                None
+                                let path = file_path.clone().or_else(|| {
+                                    call.arguments
+                                        .get("path")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string())
+                                });
+                                if let Some(p) = path.as_deref() {
+                                    let full =
+                                        std::path::Path::new(&config.tool_context.workspace_path)
+                                            .join(p);
+                                    std::fs::read_to_string(&full).ok()
+                                } else {
+                                    None
+                                }
                             }
                         } else {
                             None

@@ -26,11 +26,199 @@ var state = {
     settingsModelProvider: 'openai',
     selectedProviderId: null,
     selectedModelId: null,
+    reasoningEffort: 'medium',
     conversationHistory: [],
     isLoadingCompletion: false,
     providerModels: {},
     tokenUsage: { session: 0, total: 0 },
+    markdownPreviewActive: false,
+    explorer: {
+        expandedFolders: new Set(),
+        scrollPosition: 0,
+    },
+    toolLogVisible: false,
+    toolCalls: [],
+    tokenBreakdown: { input: 0, output: 0, total: 0 },
 };
+
+var hlState = {
+    requestId: 0,
+    scheduled: false,
+    debounceTimer: null,
+    sizeCap: 500 * 1024,
+    currentLangId: null,
+    currentFilePath: null,
+};
+
+function clearHighlights() {
+    var codeEl = document.getElementById('highlights-code');
+    if (codeEl) codeEl.innerHTML = '';
+    var pre = document.querySelector('.highlights-pre');
+    if (pre) pre.style.transform = 'translate(0, 0)';
+    var editor = document.getElementById('code-editor');
+    if (editor) editor.classList.remove('highlighted');
+}
+
+function isMarkdownFile(path) {
+    if (!path) return false;
+    var ext = path.toLowerCase().split('.').pop();
+    return ext === 'md' || ext === 'markdown' || ext === 'mdx';
+}
+
+function updateMarkdownPreviewToggle() {
+    var path = state.activeFile;
+    var toggle = document.getElementById('md-preview-toggle');
+    if (!toggle) return;
+
+    if (isMarkdownFile(path)) {
+        toggle.classList.remove('hidden');
+    } else {
+        toggle.classList.add('hidden');
+        // If preview was active, turn it off
+        if (state.markdownPreviewActive) {
+            toggleMarkdownPreview();
+        }
+    }
+}
+
+function toggleMarkdownPreview() {
+    var checkbox = document.getElementById('md-preview-checkbox');
+    if (!checkbox) return;
+
+    state.markdownPreviewActive = checkbox.checked;
+
+    var editor = document.getElementById('code-editor');
+    var lineNumbers = document.getElementById('line-numbers');
+    var highlights = document.querySelector('.editor-highlights');
+    var previewContainer = document.getElementById('md-preview-container');
+
+    if (state.markdownPreviewActive) {
+        // Show preview, hide editor
+        editor.classList.add('hidden');
+        lineNumbers.classList.add('hidden');
+        highlights.classList.add('hidden');
+        previewContainer.classList.remove('hidden');
+        refreshMarkdownPreview();
+    } else {
+        // Show editor, hide preview
+        editor.classList.remove('hidden');
+        lineNumbers.classList.remove('hidden');
+        highlights.classList.remove('hidden');
+        previewContainer.classList.add('hidden');
+        // Restore syntax highlighting
+        scheduleHighlight();
+    }
+}
+
+function refreshMarkdownPreview() {
+    if (!state.markdownPreviewActive) return;
+
+    var path = state.activeFile;
+    if (!path) return;
+
+    var content = state.fileContents.get(path) || '';
+    var previewContainer = document.getElementById('md-preview-container');
+    if (previewContainer) {
+        previewContainer.innerHTML = renderMarkdown(content);
+    }
+}
+
+function getExplorerStorageKey() {
+    return 'tundracode_explorer_' + (state.workspacePath || '').replace(/[^a-zA-Z0-9]/g, '_');
+}
+
+function saveExplorerState() {
+    if (!state.workspacePath) return;
+    var key = getExplorerStorageKey();
+    var data = {
+        expandedFolders: Array.from(state.explorer.expandedFolders),
+        scrollPosition: state.explorer.scrollPosition,
+    };
+    try {
+        localStorage.setItem(key, JSON.stringify(data));
+    } catch (e) {
+        console.warn('Failed to save explorer state:', e);
+    }
+}
+
+function loadExplorerState() {
+    if (!state.workspacePath) return;
+    var key = getExplorerStorageKey();
+    try {
+        var data = JSON.parse(localStorage.getItem(key) || '{}');
+        state.explorer.expandedFolders = new Set(data.expandedFolders || []);
+        state.explorer.scrollPosition = data.scrollPosition || 0;
+    } catch (e) {
+        console.warn('Failed to load explorer state:', e);
+        state.explorer.expandedFolders = new Set();
+        state.explorer.scrollPosition = 0;
+    }
+}
+
+function restoreExpandedFolders() {
+    var treeContainer = document.getElementById('file-tree');
+    if (!treeContainer) return;
+
+    state.explorer.expandedFolders.forEach(function(folderPath) {
+        var folderItem = treeContainer.querySelector('.tree-item.folder[data-path="' + folderPath + '"]');
+        if (folderItem) {
+            var children = folderItem.nextElementSibling;
+            if (children && children.classList.contains('tree-children')) {
+                children.classList.remove('hidden');
+                var chevron = folderItem.querySelector('.folder-chevron');
+                if (chevron) chevron.style.transform = 'rotate(90deg)';
+            }
+        }
+    });
+}
+
+function scheduleHighlight() {
+    if (hlState.debounceTimer) {
+        clearTimeout(hlState.debounceTimer);
+        hlState.debounceTimer = null;
+    }
+    hlState.debounceTimer = setTimeout(runHighlight, 32);
+}
+
+async function runHighlight() {
+    hlState.scheduled = false;
+    hlState.debounceTimer = null;
+    if (!state.activeFile) {
+        clearHighlights();
+        return;
+    }
+    var path = state.activeFile;
+    var langId = window.syntax ? window.syntax.detectLanguage(path) : null;
+    var isNewFile = (hlState.currentLangId !== langId || hlState.currentFilePath !== path);
+    hlState.currentLangId = langId;
+    hlState.currentFilePath = path;
+    if (!langId || !window.syntax || !window.syntax.isSupported(langId)) {
+        clearHighlights();
+        return;
+    }
+    var editor = document.getElementById('code-editor');
+    var text = editor.value;
+    if (text.length > hlState.sizeCap) {
+        clearHighlights();
+        return;
+    }
+    var myId = ++hlState.requestId;
+    var result;
+    try {
+        result = await window.syntax.highlight(langId, text, isNewFile);
+    } catch (e) {
+        console.warn('highlight failed:', e);
+        clearHighlights();
+        return;
+    }
+    if (myId !== hlState.requestId) return;
+    if (state.activeFile !== path) return;
+    var codeEl = document.getElementById('highlights-code');
+    if (codeEl) {
+        codeEl.innerHTML = result.html;
+        editor.classList.add('highlighted');
+    }
+}
 
 
 async function init() {
@@ -64,9 +252,12 @@ async function init() {
 
     setupEventListeners();
     setupAgentStreamListeners();
+    SESSION_MANAGEMENT.setup();
     updateUI();
     updateExploreButton();
     loadModelSelector();
+    adjustAgentsPanelWidth();
+    updateTokenDisplay();
 }
 
 function updateLspStatus(servers) {
@@ -83,6 +274,11 @@ function updateLspStatus(servers) {
 
 function setupEventListeners() {
     document.getElementById('explore-btn').addEventListener('click', toggleExplore);
+    document.getElementById('change-workspace-btn').addEventListener('click', function(e) {
+        e.stopPropagation();
+        document.getElementById('explore-dropdown').classList.add('hidden');
+        showWorkspacePicker();
+    });
     document.getElementById('agents-toggle').addEventListener('click', toggleAgentsPanel);
     document.getElementById('settings-btn').addEventListener('click', toggleSettings);
 
@@ -93,7 +289,16 @@ function setupEventListeners() {
     editor.addEventListener('keyup', updateCursorPosition);
     editor.addEventListener('scroll', syncLineNumbersScroll);
 
+    // Markdown preview toggle
+    var mdPreviewCheckbox = document.getElementById('md-preview-checkbox');
+    if (mdPreviewCheckbox) {
+        mdPreviewCheckbox.addEventListener('change', toggleMarkdownPreview);
+    }
+
     document.getElementById('agent-send').addEventListener('click', sendAskMessage);
+    document.getElementById('reasoning-effort').addEventListener('change', function(e) {
+        state.reasoningEffort = e.target.value || 'medium';
+    });
     document.getElementById('agent-input').addEventListener('keydown', function(e) {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
@@ -117,9 +322,15 @@ function setupEventListeners() {
     });
 
     setupResizeHandle();
+    setupToolLogResizeHandle();
     setupModeSelector();
     setupAutoResize();
     setupModelSelector();
+
+    window.addEventListener('resize', function() {
+        syncLineNumbersScroll();
+        scheduleHighlight();
+    });
 }
 
 
@@ -143,8 +354,41 @@ function setupResizeHandle() {
         var newWidth = containerRect.right - e.clientX;
         var containerWidth = containerRect.width;
         var percent = (newWidth / containerWidth) * 100;
-        percent = Math.max(20, Math.min(60, percent));
+        percent = Math.max(20, Math.min(70, percent));
         panel.style.width = percent + '%';
+    });
+
+    document.addEventListener('mouseup', function() {
+        if (isResizing) {
+            isResizing = false;
+            handle.classList.remove('active');
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+        }
+    });
+}
+
+function setupToolLogResizeHandle() {
+    var handle = document.getElementById('tool-log-resize-handle');
+    var subpanel = document.getElementById('tool-log-subpanel');
+    var isResizing = false;
+
+    if (!handle || !subpanel) return;
+
+    handle.addEventListener('mousedown', function(e) {
+        isResizing = true;
+        handle.classList.add('active');
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+        e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', function(e) {
+        if (!isResizing) return;
+        var subpanelRect = subpanel.getBoundingClientRect();
+        var newWidth = subpanelRect.right - e.clientX;
+        newWidth = Math.max(200, Math.min(500, newWidth));
+        subpanel.style.width = newWidth + 'px';
     });
 
     document.addEventListener('mouseup', function() {
@@ -160,6 +404,9 @@ function setupResizeHandle() {
 
 async function openWorkspace(path) {
     try {
+        if (state.workspacePath && state.workspacePath !== path) {
+            resetWorkspaceState();
+        }
         await invoke('open_workspace', { path: path });
         state.workspacePath = path;
         document.getElementById('explore-dropdown').classList.remove('hidden');
@@ -175,14 +422,23 @@ async function openWorkspace(path) {
 function toggleExplore(e) {
     e.stopPropagation();
     var dropdown = document.getElementById('explore-dropdown');
-    dropdown.classList.toggle('hidden');
+    var tree = document.getElementById('file-tree');
 
-    if (!dropdown.classList.contains('hidden')) {
+    if (dropdown.classList.contains('hidden')) {
+        // Opening - state will be loaded in loadFileTree
+        dropdown.classList.toggle('hidden');
         if (state.workspacePath) {
             loadFileTree();
         } else {
             showWorkspacePicker();
         }
+    } else {
+        // Closing - save scroll position
+        if (tree) {
+            state.explorer.scrollPosition = tree.scrollTop;
+        }
+        saveExplorerState();
+        dropdown.classList.toggle('hidden');
     }
 }
 
@@ -211,9 +467,21 @@ async function loadFileTree(subPath) {
             header.className = 'dropdown-header';
             header.textContent = state.workspacePath ? state.workspacePath.split('/').pop() : 'Workspace';
             tree.appendChild(header);
+
+            // Load and restore explorer state
+            loadExplorerState();
         }
 
         entries.forEach(function(entry) { renderTreeItem(tree, entry, subPath); });
+
+        // Restore expanded folders after rendering
+        if (subPath === '') {
+            restoreExpandedFolders();
+            // Restore scroll position
+            if (state.explorer.scrollPosition > 0) {
+                tree.scrollTop = state.explorer.scrollPosition;
+            }
+        }
     } catch (err) {
         tree.innerHTML = '<div class="tree-item">Error: ' + err + '</div>';
     }
@@ -224,16 +492,34 @@ function renderTreeItem(container, entry, parentPath) {
     div.className = 'tree-item ' + (entry.is_directory ? 'folder' : '');
     div.style.paddingLeft = (12 + (parentPath.split('/').length - 1) * 16) + 'px';
 
+    if (entry.is_directory) {
+        div.setAttribute('data-path', entry.path);
+    }
+
     var iconPath = getFileIcon(entry.name, entry.is_directory);
     var iconHtml = wrapIcon(iconPath);
 
-    div.innerHTML = iconHtml + '<span>' + entry.name + '</span>';
+    var chevronHtml = entry.is_directory
+        ? '<span class="folder-chevron" style="display:inline-block;width:14px;text-align:center;transition:transform 0.15s;">▶</span>'
+        : '<span style="width:14px;display:inline-block;"></span>';
+
+    div.innerHTML = chevronHtml + iconHtml + '<span>' + entry.name + '</span>';
 
     if (entry.is_directory) {
-        div.addEventListener('click', function() {
+        div.addEventListener('click', function(e) {
+            e.stopPropagation();
             var childrenContainer = div.nextElementSibling;
             if (childrenContainer && childrenContainer.classList.contains('tree-children')) {
-                childrenContainer.classList.toggle('hidden');
+                var isHidden = childrenContainer.classList.toggle('hidden');
+                var chevron = div.querySelector('.folder-chevron');
+                if (chevron) chevron.style.transform = isHidden ? 'rotate(0deg)' : 'rotate(90deg)';
+
+                if (!isHidden) {
+                    state.explorer.expandedFolders.add(entry.path);
+                } else {
+                    state.explorer.expandedFolders.delete(entry.path);
+                }
+                saveExplorerState();
             } else {
                 loadDirectoryContents(entry.path, div);
             }
@@ -252,6 +538,13 @@ async function loadDirectoryContents(path, parentElement) {
         childrenContainer.className = 'tree-children';
         entries.forEach(function(entry) { renderTreeItem(childrenContainer, entry, path); });
         parentElement.after(childrenContainer);
+
+        // Restore expanded state for nested folders
+        if (state.explorer.expandedFolders.has(path)) {
+            childrenContainer.classList.remove('hidden');
+            var chevron = parentElement.querySelector('.folder-chevron');
+            if (chevron) chevron.style.transform = 'rotate(90deg)';
+        }
     } catch (err) {
         console.error('Error cargando directorio:', err);
     }
@@ -278,8 +571,11 @@ async function openFile(path, name) {
         editor.value = result.content;
         editor.dataset.path = path;
         updateLineNumbers();
+        scheduleHighlight();
+        updateMarkdownPreviewToggle();
 
-        document.getElementById('explore-dropdown').classList.add('hidden');
+        // Don't auto-close explorer - allow opening multiple files
+        // document.getElementById('explore-dropdown').classList.add('hidden');
     } catch (err) {
         console.error('Error abriendo archivo:', err);
     }
@@ -305,8 +601,10 @@ function closeFile(path, event) {
             editor.value = state.fileContents.get(state.activeFile) || '';
             editor.dataset.path = state.activeFile;
             updateLineNumbers();
+            scheduleHighlight();
         } else {
             showPlaceholder();
+            clearHighlights();
         }
     }
 
@@ -320,6 +618,8 @@ function setActiveFile(path) {
     editor.dataset.path = path;
     renderTabs();
     updateLineNumbers();
+    scheduleHighlight();
+    updateMarkdownPreviewToggle();
 }
 
 function renderTabs() {
@@ -362,6 +662,12 @@ async function onEditorInput() {
 
     updateLineNumbers();
     updateCursorPosition();
+
+    if (state.markdownPreviewActive) {
+        refreshMarkdownPreview();
+    } else {
+        scheduleHighlight();
+    }
 }
 
 function onEditorKeydown(e) {
@@ -410,12 +716,35 @@ function syncLineNumbersScroll() {
     var editor = document.getElementById('code-editor');
     var lineNumbers = document.getElementById('line-numbers');
     lineNumbers.scrollTop = editor.scrollTop;
+
+    var pre = document.querySelector('.highlights-pre');
+    if (pre) {
+        pre.style.transform = 'translate(' + (-editor.scrollLeft) + 'px, ' + (-editor.scrollTop) + 'px)';
+    }
 }
 
 function updateExploreButton() {
     var btn = document.getElementById('explore-btn');
     var span = btn.querySelector('span');
     span.textContent = state.workspacePath ? 'Explore' : 'Select Workspace';
+    var headerName = document.getElementById('explore-workspace-name');
+    if (headerName) {
+        headerName.textContent = state.workspacePath
+            ? state.workspacePath.split('/').pop()
+            : 'Workspace';
+    }
+}
+
+function resetWorkspaceState() {
+    state.openFiles.forEach(function(f) { state.fileContents.delete(f.path); });
+    state.openFiles = [];
+    state.activeFile = null;
+    state.modifiedFiles.clear();
+    clearHighlights();
+    showPlaceholder();
+    renderTabs();
+    updateGitStatus();
+    newSession();
 }
 
 function updateCursorPosition() {
@@ -432,6 +761,9 @@ function toggleAgentsPanel() {
     var panel = document.getElementById('agents-panel');
     state.agentsPanelVisible = !state.agentsPanelVisible;
     panel.classList.toggle('collapsed', !state.agentsPanelVisible);
+    if (state.agentsPanelVisible) {
+        adjustAgentsPanelWidth();
+    }
 }
 
 function setAgentMode(mode) {
@@ -494,6 +826,191 @@ function setupAutoResize() {
     });
 }
 
+function toggleToolLog() {
+    state.toolLogVisible = !state.toolLogVisible;
+    var subpanel = document.getElementById('tool-log-subpanel');
+    var emptyState = document.getElementById('tool-log-empty');
+    var entries = document.getElementById('tool-log-entries');
+    var toggleBtn = document.getElementById('tool-log-toggle-btn');
+    var resizeHandle = document.getElementById('tool-log-resize-handle');
+    
+    if (state.toolLogVisible) {
+        subpanel.classList.remove('collapsed');
+        subpanel.style.width = '300px';
+        if (resizeHandle) resizeHandle.style.display = 'block';
+        if (state.toolCalls.length > 0) {
+            emptyState.style.display = 'none';
+            entries.style.display = 'block';
+        }
+        if (toggleBtn) toggleBtn.classList.add('active');
+    } else {
+        subpanel.classList.add('collapsed');
+        subpanel.style.width = '0';
+        if (resizeHandle) resizeHandle.style.display = 'none';
+        if (toggleBtn) toggleBtn.classList.remove('active');
+    }
+    adjustAgentsPanelWidth();
+}
+
+function adjustAgentsPanelWidth() {
+    var panel = document.getElementById('agents-panel');
+    var subpanel = document.getElementById('tool-log-subpanel');
+    var container = document.getElementById('main-container');
+    
+    if (!panel || !container) return;
+    
+    var containerRect = container.getBoundingClientRect();
+    var minWidth = 300;
+    var maxWidth = 800;
+    
+    if (state.toolLogVisible && state.toolCalls.length > 0) {
+        var newWidth = Math.min(maxWidth, Math.max(minWidth, containerRect.width * 0.5));
+        panel.style.width = newWidth + 'px';
+    } else {
+        var currentPercent = (panel.offsetWidth / containerRect.width) * 100;
+        var newWidth = Math.min(maxWidth, Math.max(minWidth, containerRect.width * (currentPercent / 100)));
+        panel.style.width = newWidth + 'px';
+    }
+}
+
+function updateTokenDisplay() {
+    var inputEl = document.getElementById('token-input');
+    var outputEl = document.getElementById('token-output');
+    var totalEl = document.getElementById('token-total');
+    var tokenUsageEl = document.getElementById('token-usage');
+    
+    if (inputEl) inputEl.textContent = state.tokenBreakdown.input.toLocaleString();
+    if (outputEl) outputEl.textContent = state.tokenBreakdown.output.toLocaleString();
+    if (totalEl) totalEl.textContent = state.tokenBreakdown.total.toLocaleString();
+    if (tokenUsageEl) tokenUsageEl.textContent = 'Tokens: ' + state.tokenBreakdown.total.toLocaleString();
+}
+
+function addToolLogEntry(toolName, filePath, callId, status, details) {
+    var emptyState = document.getElementById('tool-log-empty');
+    var entries = document.getElementById('tool-log-entries');
+    var subpanel = document.getElementById('tool-log-subpanel');
+    
+    if (emptyState) emptyState.style.display = 'none';
+    if (entries) entries.style.display = 'block';
+    if (subpanel && state.toolLogVisible) {
+        subpanel.classList.remove('collapsed');
+    }
+    
+    var display = TOOL_DISPLAY_NAMES[toolName] || { label: toolName, icon: '⚙️' };
+    var statusClass = status === 'running' ? 'running' : (status === 'done' ? 'done' : 'error');
+    
+    var existingCall = state.toolCalls.find(function(c) { return c.callId === callId; });
+    var startTime = existingCall ? existingCall.startTime : Date.now();
+    var duration = '';
+    if (status === 'done' && existingCall && existingCall.startTime) {
+        duration = ((Date.now() - existingCall.startTime) / 1000).toFixed(1) + 's';
+    }
+    
+    var time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    var isLastRunning = status === 'running';
+    
+    var statusHtml = '';
+    if (status === 'running') {
+        statusHtml = '<span class="tool-log-spinner"></span><span>Running...</span>';
+    } else if (status === 'done') {
+        statusHtml = '<span class="tool-log-check">✓</span>' + (duration ? '<span class="tool-log-duration">' + duration + '</span>' : '');
+    } else {
+        statusHtml = '<span>Error</span>';
+    }
+    
+    var entry = document.createElement('div');
+    entry.className = 'tool-log-entry';
+    entry.dataset.callId = callId;
+    entry.innerHTML = 
+        '<div class="tool-log-entry-header">' +
+            '<div class="tool-log-entry-tool">' +
+                '<span class="tool-log-entry-tool-icon">' + display.icon + '</span>' +
+                '<span>' + display.label + '</span>' +
+            '</div>' +
+            '<div class="tool-log-entry-status ' + statusClass + '">' +
+                statusHtml +
+            '</div>' +
+            '<span class="tool-log-entry-time">' + time + '</span>' +
+        '</div>' +
+        (filePath ? '<div class="tool-log-entry-file">' + escapeHtml(filePath) + '</div>' : '') +
+        (details ? '<div class="tool-log-entry-details">' + escapeHtml(details) + '</div>' : '');
+    
+    if (entries) {
+        entries.appendChild(entry);
+        entries.scrollTop = entries.scrollHeight;
+    }
+    
+    updateRunningStates();
+    
+    if (state.toolCalls.length > 100) {
+        state.toolCalls.shift();
+        var firstEntry = entries.querySelector('.tool-log-entry');
+        if (firstEntry) firstEntry.remove();
+    }
+}
+
+function updateToolLogEntry(callId, status, details) {
+    var entries = document.getElementById('tool-log-entries');
+    if (!entries) return;
+    
+    var entry = entries.querySelector('.tool-log-entry[data-call-id="' + callId + '"]');
+    if (!entry) return;
+    
+    var existingCall = state.toolCalls.find(function(c) { return c.callId === callId; });
+    var startTime = existingCall ? existingCall.startTime : null;
+    var duration = '';
+    if (status === 'done' && startTime) {
+        duration = ((Date.now() - startTime) / 1000).toFixed(1) + 's';
+    }
+    
+    var statusEl = entry.querySelector('.tool-log-entry-status');
+    if (statusEl) {
+        statusEl.className = 'tool-log-entry-status ' + (status === 'running' ? 'running' : (status === 'done' ? 'done' : 'error'));
+        
+        var statusHtml = '';
+        if (status === 'running') {
+            statusHtml = '<span class="tool-log-spinner"></span><span>Running...</span>';
+        } else if (status === 'done') {
+            statusHtml = '<span class="tool-log-check">✓</span>' + (duration ? '<span class="tool-log-duration">' + duration + '</span>' : '');
+        } else {
+            statusHtml = '<span>Error</span>';
+        }
+        statusEl.innerHTML = statusHtml;
+    }
+    
+    if (details) {
+        var detailsEl = entry.querySelector('.tool-log-entry-details');
+        if (!detailsEl) {
+            detailsEl = document.createElement('div');
+            detailsEl.className = 'tool-log-entry-details';
+            entry.appendChild(detailsEl);
+        }
+        detailsEl.textContent = details;
+    }
+    
+    updateRunningStates();
+}
+
+function updateRunningStates() {
+    var entries = document.getElementById('tool-log-entries');
+    if (!entries) return;
+    
+    var allEntries = entries.querySelectorAll('.tool-log-entry');
+    var runningEntries = Array.from(allEntries).filter(function(el) {
+        return el.querySelector('.tool-log-entry-status.running');
+    });
+    
+    runningEntries.forEach(function(entry, index) {
+        var statusEl = entry.querySelector('.tool-log-entry-status');
+        var spinner = statusEl.querySelector('.tool-log-spinner');
+        var isLast = index === runningEntries.length - 1;
+        
+        if (spinner) {
+            spinner.style.display = isLast ? 'inline-block' : 'none';
+        }
+    });
+}
+
 
 function setupModelSelector() {
     var btn = document.getElementById('model-selector-btn');
@@ -535,6 +1052,7 @@ async function loadModelSelector() {
 
     state.providers = sortedProviders;
     updateModelSelectorDisplay();
+    updateReasoningSelectorVisibility();
 }
 
 function updateModelSelectorDisplay() {
@@ -544,6 +1062,32 @@ function updateModelSelectorDisplay() {
         nameEl.textContent = (provider ? provider.name : state.selectedProviderId) + ' / ' + state.selectedModelId;
     } else {
         nameEl.textContent = 'No model selected';
+    }
+    updateReasoningSelectorVisibility();
+}
+
+var REASONING_MODEL_PATTERNS = [
+    /^o[134]/,
+    /^o[134]-/,
+    /thinking/i,
+    /reasoning/i,
+];
+
+function modelSupportsReasoning(modelId) {
+    if (!modelId) return false;
+    return REASONING_MODEL_PATTERNS.some(function(pat) { return pat.test(modelId); });
+}
+
+function updateReasoningSelectorVisibility() {
+    var el = document.querySelector('.reasoning-selector');
+    if (!el) return;
+    var supported = modelSupportsReasoning(state.selectedModelId);
+    if (supported) {
+        el.classList.remove('hidden');
+        state.reasoningEffort = document.getElementById('reasoning-effort').value || 'medium';
+    } else {
+        el.classList.add('hidden');
+        state.reasoningEffort = 'none';
     }
 }
 
@@ -636,6 +1180,7 @@ async function renderModelDropdown() {
                     state.selectedProviderId = provId;
                     state.selectedModelId = mId;
                     updateModelSelectorDisplay();
+                    updateReasoningSelectorVisibility();
                     dropdown.classList.add('hidden');
                 };
             })(provider.id, modelId));
@@ -677,6 +1222,7 @@ async function sendAskMessage() {
 
     state.isLoadingCompletion = true;
     state.currentRunId = runId;
+    resetReasoningBlock();
     showStopButton();
     var thinkingEl = addThinkingIndicator(mode);
 
@@ -685,11 +1231,33 @@ async function sendAskMessage() {
         if (!state.selectedProviderId || !state.selectedModelId) {
             response = 'No model selected. Please select a model in the Agent panel header.';
         } else if (mode === 'plan') {
-            response = await invoke('generate_plan', {
+            removeThinkingIndicator(thinkingEl);
+            hideStopButton();
+            state.isLoadingCompletion = false;
+            state.currentRunId = null;
+
+            var planResult = await invoke('generate_plan', {
+                runId: runId,
                 description: message,
                 providerId: state.selectedProviderId,
-                modelId: state.selectedModelId
+                modelId: state.selectedModelId,
+                reasoningEffort: state.reasoningEffort
             });
+
+            if (planResult && planResult.file_path) {
+                renderPlanCard(planResult);
+                state.conversationHistory.push({
+                    role: 'assistant',
+                    content: '[Plan: ' + (planResult.title || 'Untitled') + '](' + planResult.file_path + ')',
+                    mode: 'plan',
+                    provider: state.selectedProviderId,
+                    model: state.selectedModelId,
+                    timestamp: Date.now()
+                });
+            } else {
+                addChatMessage('assistant', 'Plan generated but no file was created.');
+            }
+            return;
         } else if (mode === 'build') {
             var buildResult = await invoke('run_build_agent', {
                 runId: runId,
@@ -697,6 +1265,7 @@ async function sendAskMessage() {
                 planAnnotations: null,
                 providerId: state.selectedProviderId,
                 modelId: state.selectedModelId,
+                reasoningEffort: state.reasoningEffort
             });
             response = 'Build complete. ' + (buildResult.proposals ? buildResult.proposals.length : 0) + ' changes proposed.';
             if (buildResult.proposals && buildResult.proposals.length > 0) {
@@ -708,6 +1277,7 @@ async function sendAskMessage() {
                 runId: runId,
                 providerId: state.selectedProviderId,
                 modelId: state.selectedModelId,
+                reasoningEffort: state.reasoningEffort,
                 messages: state.conversationHistory,
                 systemPrompt: systemPrompt,
             });
@@ -764,25 +1334,70 @@ function setupAgentStreamListeners() {
         appendToStreamingMessage(payload.chunk || '');
     });
 
+    tauriEvent.listen('agent-reasoning', function(event) {
+        var payload = event.payload || {};
+        if (state.currentRunId && payload.run_id !== state.currentRunId) return;
+        appendToReasoningBlock(payload.chunk || '');
+    });
+
     tauriEvent.listen('agent-tool-call', function(event) {
         var payload = event.payload || {};
         if (state.currentRunId && payload.run_id !== state.currentRunId) return;
-        showToolActivity(payload);
+        var toolName = payload.tool_name || 'Unknown';
+        var filePath = payload.file_path || null;
+        var callId = payload.call_id || '';
+        var status = payload.status || 'running';
+        var details = payload.details || null;
+        
+        var existingCall = state.toolCalls.find(function(c) { return c.callId === callId; });
+        if (!existingCall) {
+            state.toolCalls.push({
+                toolName: toolName,
+                filePath: filePath,
+                callId: callId,
+                status: status,
+                details: details,
+                timestamp: Date.now(),
+                startTime: Date.now()
+            });
+            addToolLogEntry(toolName, filePath, callId, status, details);
+        } else {
+            existingCall.status = status;
+            existingCall.details = details;
+            updateToolLogEntry(callId, status, details);
+        }
     });
 
     tauriEvent.listen('agent-done', function(event) {
         var payload = event.payload || {};
         if (state.currentRunId && payload.run_id !== state.currentRunId) return;
+        finalizeStreamingMessage();
         if (payload.tokens_used) {
             state.tokenUsage.session += payload.tokens_used;
             state.tokenUsage.total += payload.tokens_used;
+            state.tokenBreakdown.total += payload.tokens_used;
+            if (payload.tokens_input) {
+                state.tokenBreakdown.input += payload.tokens_input;
+            }
+            if (payload.tokens_output) {
+                state.tokenBreakdown.output += payload.tokens_output;
+            } else if (payload.tokens_used) {
+                state.tokenBreakdown.output += payload.tokens_used;
+            }
             updateTokenDisplay();
         }
+        state.toolCalls.forEach(function(call) {
+            if (call.status === 'running') {
+                call.status = 'done';
+                updateToolLogEntry(call.callId, 'done', call.details);
+            }
+        });
     });
 
     tauriEvent.listen('agent-error', function(event) {
         var payload = event.payload || {};
         if (state.currentRunId && payload.run_id !== state.currentRunId) return;
+        finalizeStreamingMessage();
         addChatMessage('assistant', 'Error: ' + (payload.error || 'unknown'));
     });
 }
@@ -795,6 +1410,14 @@ function appendToStreamingMessage(chunk) {
     if (indicator) {
         target = document.createElement('div');
         target.className = 'chat-message assistant streaming';
+        target.dataset.rawContent = '';
+        var rl = document.createElement('div');
+        rl.className = 'chat-role-label';
+        rl.textContent = 'Agent';
+        target.appendChild(rl);
+        var body = document.createElement('div');
+        body.className = 'chat-message-body';
+        target.appendChild(body);
         container.replaceChild(target, indicator);
     } else {
         var last = container.querySelector('.chat-message.assistant.streaming');
@@ -802,12 +1425,93 @@ function appendToStreamingMessage(chunk) {
         if (!target) {
             target = document.createElement('div');
             target.className = 'chat-message assistant streaming';
+            target.dataset.rawContent = '';
+            var rl2 = document.createElement('div');
+            rl2.className = 'chat-role-label';
+            rl2.textContent = 'Agent';
+            target.appendChild(rl2);
+            var body2 = document.createElement('div');
+            body2.className = 'chat-message-body';
+            target.appendChild(body2);
             container.appendChild(target);
         }
     }
-    target.textContent = (target.textContent || '') + chunk;
+    target.dataset.rawContent = (target.dataset.rawContent || '') + chunk;
+    try {
+        target.querySelector('.chat-message-body').innerHTML = renderMarkdown(target.dataset.rawContent);
+    } catch (e) {
+        target.querySelector('.chat-message-body').textContent = target.dataset.rawContent;
+    }
     container.scrollTop = container.scrollHeight;
 }
+
+function finalizeStreamingMessage() {
+    var container = document.getElementById('chat-messages');
+    if (!container) return;
+    var streaming = container.querySelector('.chat-message.assistant.streaming');
+    if (streaming) {
+        var raw = streaming.dataset.rawContent || '';
+        var body = streaming.querySelector('.chat-message-body');
+        if (body) {
+            try {
+                body.innerHTML = renderMarkdown(raw);
+            } catch (e) {
+                body.textContent = raw;
+            }
+        }
+        streaming.classList.remove('streaming');
+        delete streaming.dataset.rawContent;
+    }
+}
+
+var _reasoningBlock = null;
+
+function appendToReasoningBlock(chunk) {
+    var container = document.getElementById('chat-messages');
+    if (!container) return;
+
+    if (!_reasoningBlock) {
+        _reasoningBlock = document.createElement('div');
+        _reasoningBlock.className = 'reasoning-block';
+        _reasoningBlock.dataset.rawContent = '';
+        var toggle = document.createElement('div');
+        toggle.className = 'reasoning-toggle';
+        toggle.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg> <span>Thinking</span>';
+        toggle.addEventListener('click', function() {
+            _reasoningBlock.classList.toggle('expanded');
+        });
+        _reasoningBlock.appendChild(toggle);
+        var content = document.createElement('div');
+        content.className = 'reasoning-content';
+        _reasoningBlock.appendChild(content);
+        container.appendChild(_reasoningBlock);
+    }
+
+    _reasoningBlock.dataset.rawContent = (_reasoningBlock.dataset.rawContent || '') + chunk;
+    var contentEl = _reasoningBlock.querySelector('.reasoning-content');
+    if (contentEl) {
+        contentEl.textContent = _reasoningBlock.dataset.rawContent;
+    }
+    container.scrollTop = container.scrollHeight;
+}
+
+function resetReasoningBlock() {
+    _reasoningBlock = null;
+}
+
+var TOOL_DISPLAY_NAMES = {
+    'ReadFile': { label: 'Reading', icon: '📖' },
+    'WriteFile': { label: 'Writing', icon: '✏️' },
+    'CreateFile': { label: 'Creating', icon: '📄' },
+    'DeleteFile': { label: 'Deleting', icon: '🗑️' },
+    'ApplyPatch': { label: 'Editing', icon: '🔧' },
+    'ListDirectory': { label: 'Listing', icon: '📁' },
+    'RunCommand': { label: 'Running', icon: '⚡' },
+    'GetDiagnostics': { label: 'Checking', icon: '🔍' },
+    'GetWorkspace': { label: 'Scanning', icon: '📂' },
+    'SearchCodebase': { label: 'Searching', icon: '🔎' },
+    'SearchInWeb': { label: 'Researching', icon: '🌐' },
+};
 
 function showToolActivity(payload) {
     var container = document.getElementById('chat-messages');
@@ -817,14 +1521,15 @@ function showToolActivity(payload) {
         existing.classList.toggle('done', true);
         return;
     }
-    var activity = document.createElement('div');
-    activity.className = 'tool-activity';
-    activity.dataset.callId = payload.call_id;
+    var display = TOOL_DISPLAY_NAMES[payload.tool_name] || { label: payload.tool_name, icon: '⚙️' };
     var fileChip = payload.file_path
         ? ' <span class="tool-file">' + escapeHtml(payload.file_path) + '</span>'
         : '';
-    activity.innerHTML = '<span class="tool-spinner"></span> ' +
-        '<span class="tool-name">' + escapeHtml(payload.tool_name) + '</span>' + fileChip;
+    var activity = document.createElement('div');
+    activity.className = 'tool-activity';
+    activity.dataset.callId = payload.call_id;
+    activity.innerHTML = '<span class="tool-icon">' + display.icon + '</span> ' +
+        '<span class="tool-name">' + display.label + '</span>' + fileChip;
     container.appendChild(activity);
     container.scrollTop = container.scrollHeight;
 }
@@ -842,7 +1547,23 @@ function addThinkingIndicator(mode) {
     var indicator = document.createElement('div');
     indicator.className = 'thinking-indicator chat-message assistant pending';
     indicator.dataset.mode = mode || 'ask';
-    indicator.innerHTML = '<div class="thinking-dots"><span></span><span></span><span></span></div><span class="thinking-text">Thinking...</span>';
+    var rl = document.createElement('div');
+    rl.className = 'chat-role-label';
+    rl.textContent = 'Agent';
+    indicator.appendChild(rl);
+    var dotsRow = document.createElement('div');
+    dotsRow.style.display = 'flex';
+    dotsRow.style.alignItems = 'center';
+    dotsRow.style.gap = '8px';
+    var dots = document.createElement('div');
+    dots.className = 'thinking-dots';
+    dots.innerHTML = '<span></span><span></span><span></span>';
+    dotsRow.appendChild(dots);
+    var txt = document.createElement('span');
+    txt.className = 'thinking-text';
+    txt.textContent = 'Thinking...';
+    dotsRow.appendChild(txt);
+    indicator.appendChild(dotsRow);
     container.appendChild(indicator);
     container.scrollTop = container.scrollHeight;
     return indicator;
@@ -858,7 +1579,18 @@ function addChatMessage(role, content) {
     var container = document.getElementById('chat-messages');
     var msg = document.createElement('div');
     msg.className = 'chat-message ' + role;
-    msg.innerHTML = renderMarkdown(content);
+    var label = document.createElement('div');
+    label.className = 'chat-role-label';
+    label.textContent = role === 'user' ? 'You' : 'Agent';
+    msg.appendChild(label);
+    var body = document.createElement('div');
+    body.className = 'chat-message-body';
+    try {
+        body.innerHTML = renderMarkdown(content);
+    } catch (e) {
+        body.textContent = content;
+    }
+    msg.appendChild(body);
     container.appendChild(msg);
     container.scrollTop = container.scrollHeight;
 }
@@ -867,11 +1599,18 @@ function addPlanMessage(role, content) {
     var container = document.getElementById('chat-messages');
     var msg = document.createElement('div');
     msg.className = 'chat-message ' + role;
+    var label = document.createElement('div');
+    label.className = 'chat-role-label';
+    label.textContent = role === 'user' ? 'You' : 'Agent';
+    msg.appendChild(label);
+    var body = document.createElement('div');
+    body.className = 'chat-message-body';
     if (role === 'assistant') {
-        msg.innerHTML = renderPlanContent(content);
+        body.innerHTML = renderPlanContent(content);
     } else {
-        msg.innerHTML = renderMarkdown(content);
+        body.innerHTML = renderMarkdown(content);
     }
+    msg.appendChild(body);
     container.appendChild(msg);
     container.scrollTop = container.scrollHeight;
 }
@@ -880,7 +1619,14 @@ function addBuildMessage(role, content) {
     var container = document.getElementById('chat-messages');
     var msg = document.createElement('div');
     msg.className = 'chat-message ' + role;
-    msg.innerHTML = renderMarkdown(content);
+    var label = document.createElement('div');
+    label.className = 'chat-role-label';
+    label.textContent = role === 'user' ? 'You' : 'Agent';
+    msg.appendChild(label);
+    var body = document.createElement('div');
+    body.className = 'chat-message-body';
+    body.innerHTML = renderMarkdown(content);
+    msg.appendChild(body);
     container.appendChild(msg);
     container.scrollTop = container.scrollHeight;
 }
@@ -1812,27 +2558,9 @@ function hideStopButton() {
     document.getElementById('agent-send').classList.remove('hidden');
 }
 
-function updateTokenDisplay() {
-    var el = document.getElementById('token-usage');
-    if (el) {
-        el.textContent = 'Tokens: ' + state.tokenUsage.session + ' / ' + state.tokenUsage.total;
-    }
-}
-
 function truncateConversation(history) {
-    var MAX_MESSAGES = 10;
-    if (history.length <= MAX_MESSAGES) return history;
-    return history.slice(history.length - MAX_MESSAGES);
-}
-
-function showToolLog(log) {
-    var el = document.getElementById('tool-log-content');
-    if (!el) return;
-    var html = '';
-    log.forEach(function(entry) {
-        html += '<div class="tool-log-entry"><pre>' + entry + '</pre></div>';
-    });
-    el.innerHTML = html;
+    // No truncation - keep full conversation history
+    return history;
 }
 
 function showDiffViewer(filePath, diffContent) {
@@ -2153,7 +2881,7 @@ function renderPlanContent(rawContent) {
         '</div>';
     }
 
-    if (sections.steps.length > 0) {
+    if (sections.steps.length > 0 && sections.tasks.length === 0) {
         html += '<div class="plan-section">' +
             '<h2>Steps</h2>' +
             '<ol class="plan-steps">' +
@@ -2167,6 +2895,31 @@ function renderPlanContent(rawContent) {
                 '</li>';
             }).join('') +
             '</ol>' +
+        '</div>';
+    }
+
+    if (sections.tasks.length > 0) {
+        html += '<div class="plan-section plan-tasks-section">' +
+            '<h2>Tasks (' + sections.tasks.length + ')</h2>' +
+            '<div class="plan-tasks">' +
+            sections.tasks.map(function(task) {
+                var detailsHtml = '';
+                if (task.goal) detailsHtml += '<div class="plan-task-detail"><strong>Goal:</strong> ' + escapeHtml(task.goal) + '</div>';
+                if (task.files) detailsHtml += '<div class="plan-task-detail"><strong>Files:</strong> ' + escapeHtml(task.files) + '</div>';
+                if (task.tools) detailsHtml += '<div class="plan-task-detail"><strong>Tools:</strong> ' + escapeHtml(task.tools) + '</div>';
+                if (task.depends) detailsHtml += '<div class="plan-task-detail"><strong>Depends:</strong> ' + escapeHtml(task.depends) + '</div>';
+                if (task.acceptance) detailsHtml += '<div class="plan-task-detail"><strong>Acceptance:</strong> ' + escapeHtml(task.acceptance) + '</div>';
+
+                return '<details class="plan-task" data-task="' + task.number + '">' +
+                    '<summary class="plan-task-header">' +
+                        '<input type="checkbox" class="plan-task-check" data-task="' + task.number + '" onclick="event.stopPropagation()">' +
+                        '<span class="plan-task-title">Task ' + task.number + ': ' + escapeHtml(task.title) + '</span>' +
+                        '<button class="plan-task-implement-btn" data-task-num="' + task.number + '">Implement</button>' +
+                    '</summary>' +
+                    '<div class="plan-task-body">' + detailsHtml + '</div>' +
+                '</details>';
+            }).join('') +
+            '</div>' +
         '</div>';
     }
 
@@ -2209,6 +2962,7 @@ function parsePlanSections(content) {
         stack: null,
         alternatives: null,
         steps: [],
+        tasks: [],
         risks: [],
         estimation: null,
         investigations: [],
@@ -2218,8 +2972,13 @@ function parsePlanSections(content) {
     var lines = content.split('\n');
     var currentSection = null;
     var currentContent = [];
+    var currentTask = null;
 
     function flushSection() {
+        if (currentTask) {
+            sections.tasks.push(currentTask);
+            currentTask = null;
+        }
         if (!currentSection) return;
         var text = currentContent.join('\n').trim();
         if (!text) return;
@@ -2249,10 +3008,41 @@ function parsePlanSections(content) {
     for (var i = 0; i < lines.length; i++) {
         var line = lines[i];
         var h2Match = line.match(/^## (.+)$/);
+        var h3TaskMatch = line.match(/^### Task (\d+):\s*(.*)/);
+
         if (h2Match) {
             flushSection();
             currentSection = h2Match[1].trim();
             currentContent = [];
+        } else if (h3TaskMatch && currentSection && (currentSection.toLowerCase().indexOf('paso') !== -1 || currentSection.toLowerCase().indexOf('step') !== -1)) {
+            if (currentTask) {
+                sections.tasks.push(currentTask);
+            }
+            currentTask = {
+                number: parseInt(h3TaskMatch[1]),
+                title: h3TaskMatch[2].trim(),
+                goal: '',
+                files: '',
+                tools: '',
+                depends: '',
+                acceptance: '',
+                raw: '',
+            };
+            currentContent = [];
+        } else if (currentTask) {
+            var goalMatch = line.match(/^\s*[-*]\s*\*\*Goal:\*\*\s*(.*)/);
+            var filesMatch = line.match(/^\s*[-*]\s*\*\*Archivos:\*\*\s*(.*)/);
+            var toolsMatch = line.match(/^\s*[-*]\s*\*\*Herramientas:\*\*\s*(.*)/);
+            var dependsMatch = line.match(/^\s*[-*]\s*\*\*Depende de:\*\*\s*(.*)/);
+            var acceptanceMatch = line.match(/^\s*[-*]\s*\*\*Criterio de aceptacion:\*\*\s*(.*)/);
+
+            if (goalMatch) currentTask.goal = goalMatch[1].trim();
+            else if (filesMatch) currentTask.files = filesMatch[1].trim();
+            else if (toolsMatch) currentTask.tools = toolsMatch[1].trim();
+            else if (dependsMatch) currentTask.depends = dependsMatch[1].trim();
+            else if (acceptanceMatch) currentTask.acceptance = acceptanceMatch[1].trim();
+
+            currentTask.raw += line + '\n';
         } else {
             currentContent.push(line);
         }
@@ -2341,13 +3131,146 @@ function setupPlanViewer() {
 }
 
 
+if (typeof marked !== 'undefined') {
+    marked.use({
+        breaks: true,
+        gfm: true,
+    });
+}
+
 function renderMarkdown(text) {
     if (typeof marked !== 'undefined') {
-        return marked.parse(text);
+        try {
+            return marked.parse(text);
+        } catch (e) {
+            console.warn('marked.parse failed:', e);
+        }
     }
     return '<pre>' + escapeHtml(text) + '</pre>';
 }
 
+function renderPlanCard(planData) {
+    var container = document.getElementById('chat-messages');
+    var card = document.createElement('div');
+    card.className = 'plan-card';
+
+    var header = document.createElement('div');
+    header.className = 'plan-card-header';
+
+    var icon = document.createElement('div');
+    icon.className = 'plan-card-icon';
+    icon.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>';
+
+    var titleEl = document.createElement('div');
+    titleEl.className = 'plan-card-title';
+    titleEl.textContent = planData.title || 'Untitled Plan';
+
+    var summaryEl = document.createElement('div');
+    summaryEl.className = 'plan-card-summary';
+    summaryEl.textContent = planData.summary || '';
+
+    header.appendChild(icon);
+    header.appendChild(titleEl);
+
+    var actions = document.createElement('div');
+    actions.className = 'plan-card-actions';
+
+    var openBtn = document.createElement('button');
+    openBtn.className = 'plan-card-btn plan-card-btn-open';
+    openBtn.textContent = 'Open in Editor';
+    openBtn.addEventListener('click', function() {
+        openPlanInView(planData.file_path, planData.title, planData.content);
+    });
+
+    var implementBtn = document.createElement('button');
+    implementBtn.className = 'plan-card-btn plan-card-btn-implement';
+    implementBtn.textContent = 'Implement All';
+    implementBtn.addEventListener('click', function() {
+        implementPlan(planData.file_path);
+    });
+
+    actions.appendChild(openBtn);
+    actions.appendChild(implementBtn);
+
+    card.appendChild(header);
+    card.appendChild(summaryEl);
+    card.appendChild(actions);
+
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
+}
+
+function openPlanInView(filePath, title, content) {
+    var planView = document.getElementById('plan-editor-view');
+    var planBody = document.getElementById('plan-editor-body');
+    var planTitle = document.getElementById('plan-editor-title');
+
+    planTitle.textContent = title || 'Plan';
+    planBody.innerHTML = renderMarkdown(content || '');
+
+    document.getElementById('editor-content').classList.add('hidden');
+    document.getElementById('editor-placeholder').classList.add('hidden');
+    planView.classList.remove('hidden');
+
+    planView._filePath = filePath;
+    planView._content = content;
+
+    planBody.querySelectorAll('.plan-task-implement-btn').forEach(function(btn) {
+        btn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            var taskNum = parseInt(btn.getAttribute('data-task-num'));
+            if (taskNum) {
+                implementPlanTask(filePath, taskNum);
+            }
+        });
+    });
+}
+
+function closePlanView() {
+    var planView = document.getElementById('plan-editor-view');
+    planView.classList.add('hidden');
+
+    if (state.activeFile) {
+        document.getElementById('editor-content').classList.remove('hidden');
+    } else {
+        document.getElementById('editor-placeholder').classList.remove('hidden');
+    }
+}
+
+async function implementPlan(planPath, taskNumbers) {
+    if (state.isLoadingCompletion) return;
+
+    setAgentMode('build');
+    state.isLoadingCompletion = true;
+    var runId = 'build_' + Date.now();
+    state.currentRunId = runId;
+    resetReasoningBlock();
+    showStopButton();
+
+    try {
+        var result = await invoke('implement_plan_with_agent', {
+            planPath: planPath,
+            taskNumbers: taskNumbers || null,
+            providerId: state.selectedProviderId,
+            modelId: state.selectedModelId,
+            reasoningEffort: state.reasoningEffort
+        });
+
+        if (result) {
+            addChatMessage('assistant', result);
+        }
+    } catch (err) {
+        addChatMessage('assistant', 'Error implementing plan: ' + err);
+    } finally {
+        hideStopButton();
+        state.isLoadingCompletion = false;
+        state.currentRunId = null;
+    }
+}
+
+function implementPlanTask(planPath, taskNumber) {
+    implementPlan(planPath, [taskNumber]);
+}
 
 function updateTokenUsage(tokens) {
     var el = document.getElementById('token-usage');
@@ -2364,6 +3287,139 @@ function updateActiveModelDisplay() {
         el.textContent = '--';
     }
 }
+
+
+var SESSION_MANAGEMENT = {
+    setup: function() {
+        var btn = document.getElementById('session-selector-btn');
+        var dropdown = document.getElementById('session-dropdown');
+
+        btn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            dropdown.classList.toggle('hidden');
+            if (!dropdown.classList.contains('hidden')) {
+                SESSION_MANAGEMENT.refreshList();
+            }
+        });
+
+        document.addEventListener('click', function(e) {
+            if (!dropdown.contains(e.target) && !btn.contains(e.target)) {
+                dropdown.classList.add('hidden');
+            }
+        });
+
+        document.getElementById('session-new-btn').addEventListener('click', function() {
+            newSession();
+            dropdown.classList.add('hidden');
+        });
+    },
+
+    async refreshList() {
+        var list = document.getElementById('session-list');
+        try {
+            var sessions = await invoke('list_sessions');
+            if (!sessions || sessions.length === 0) {
+                list.innerHTML = '<div class="session-empty">No saved sessions</div>';
+                return;
+            }
+            list.innerHTML = '';
+            sessions.forEach(function(s) {
+                var item = document.createElement('div');
+                item.className = 'session-item';
+
+                var info = document.createElement('div');
+                info.className = 'session-item-info';
+
+                var title = document.createElement('div');
+                title.className = 'session-item-title';
+                title.textContent = s.title || s.filename;
+
+                var meta = document.createElement('div');
+                meta.className = 'session-item-meta';
+                var dateStr = s.date ? s.date.split('T')[0] : '';
+                var modelStr = s.model || '';
+                meta.textContent = [dateStr, modelStr].filter(Boolean).join(' | ');
+
+                info.appendChild(title);
+                info.appendChild(meta);
+
+                var delBtn = document.createElement('button');
+                delBtn.className = 'session-item-delete';
+                delBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+                delBtn.addEventListener('click', async function(e) {
+                    e.stopPropagation();
+                    if (confirm('Delete session "' + (s.title || s.filename) + '"?')) {
+                        await invoke('delete_session', { filename: s.filename });
+                        SESSION_MANAGEMENT.refreshList();
+                    }
+                });
+
+                item.appendChild(info);
+                item.appendChild(delBtn);
+
+                item.addEventListener('click', function() {
+                    SESSION_MANAGEMENT.loadSession(s.filename);
+                    document.getElementById('session-dropdown').classList.add('hidden');
+                });
+
+                list.appendChild(item);
+            });
+        } catch (e) {
+            list.innerHTML = '<div class="session-empty">Error loading sessions</div>';
+        }
+    },
+
+    async loadSession(filename) {
+        try {
+            var session = await invoke('load_session', { filename: filename });
+            if (!session) return;
+
+            newSession();
+
+            if (session.model) {
+                var parts = session.model.split(' / ');
+                if (parts.length === 2) {
+                    state.selectedProviderId = parts[0];
+                    state.selectedModelId = parts[1];
+                    updateModelSelectorDisplay();
+                    updateReasoningSelectorVisibility();
+                }
+            }
+
+            var historyJson = await invoke('load_session_history', { filename: filename });
+            if (historyJson && Array.isArray(historyJson)) {
+                state.conversationHistory = historyJson;
+                historyJson.forEach(function(msg) {
+                    addChatMessage(msg.role, msg.content);
+                });
+            }
+        } catch (e) {
+            console.error('Error loading session:', e);
+        }
+    },
+
+    async saveSession(title) {
+        if (state.conversationHistory.length === 0) return null;
+
+        var model = state.selectedProviderId && state.selectedModelId
+            ? state.selectedProviderId + ' / ' + state.selectedModelId
+            : '';
+
+        try {
+            var filename = await invoke('save_session', {
+                title: title,
+                historyJson: JSON.stringify(state.conversationHistory),
+                model: model,
+                tokens: state.tokenUsage.session,
+                mode: state.agentMode,
+            });
+            return filename;
+        } catch (e) {
+            console.error('Error saving session:', e);
+            return null;
+        }
+    },
+};
 
 
 async function loadMemoryEditor() {
@@ -2387,10 +3443,16 @@ async function saveMemoryEditor() {
 }
 
 
-function newSession() {
+async function newSession() {
+    if (state.conversationHistory.length > 0) {
+        var firstUserMsg = state.conversationHistory.find(function(m) { return m.role === 'user'; });
+        var title = firstUserMsg ? firstUserMsg.content.substring(0, 50) : 'Untitled session';
+        await SESSION_MANAGEMENT.saveSession(title);
+    }
     state.conversationHistory = [];
     state.tokenUsage.session = 0;
     updateTokenDisplay();
+    resetReasoningBlock();
     var container = document.getElementById('chat-messages');
     container.innerHTML = '';
 }

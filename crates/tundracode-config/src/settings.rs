@@ -8,7 +8,6 @@ pub struct Settings {
     pub models: HashMap<String, ModelSettings>,
     pub shortcuts: HashMap<String, String>,
     pub autonomous_mode: bool,
-    pub budget_per_task_tokens: u32,
     pub last_workspace: Option<String>,
 }
 
@@ -16,8 +15,6 @@ pub struct Settings {
 pub struct AgentSettings {
     pub model: String,
     pub provider: String,
-    pub temperature: f32,
-    pub max_tokens: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,8 +38,6 @@ impl Default for Settings {
             AgentSettings {
                 model: "big-pickle".to_string(),
                 provider: "opencode-free".to_string(),
-                temperature: 0.2,
-                max_tokens: 4096,
             },
         );
         agents.insert(
@@ -50,8 +45,6 @@ impl Default for Settings {
             AgentSettings {
                 model: "big-pickle".to_string(),
                 provider: "opencode-free".to_string(),
-                temperature: 0.0,
-                max_tokens: 8192,
             },
         );
         agents.insert(
@@ -59,8 +52,6 @@ impl Default for Settings {
             AgentSettings {
                 model: "big-pickle".to_string(),
                 provider: "opencode-free".to_string(),
-                temperature: 0.7,
-                max_tokens: 4096,
             },
         );
 
@@ -77,7 +68,6 @@ impl Default for Settings {
             models: HashMap::new(),
             shortcuts: HashMap::new(),
             autonomous_mode: false,
-            budget_per_task_tokens: 200000,
             last_workspace: None,
         }
     }

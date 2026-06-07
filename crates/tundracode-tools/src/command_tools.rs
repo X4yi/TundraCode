@@ -78,6 +78,7 @@ impl Tool for RunCommandTool {
                 Some(stderr)
             },
             prior_content: None,
+            resulting_content: None,
             file_path: None,
         })
     }
@@ -124,7 +125,8 @@ impl Tool for GetDiagnosticsTool {
                     ),
                     error: None,
                     prior_content: None,
-                    file_path: None,
+                    resulting_content: None,
+            file_path: None,
                 });
             }
         };
@@ -155,7 +157,8 @@ impl Tool for GetDiagnosticsTool {
                 output: "No diagnostics found".to_string(),
                 error: None,
                 prior_content: None,
-                file_path: None,
+                resulting_content: None,
+            file_path: None,
             })
         } else {
             Ok(ToolResult {
@@ -167,7 +170,8 @@ impl Tool for GetDiagnosticsTool {
                     Some("Diagnostics returned errors".to_string())
                 },
                 prior_content: None,
-                file_path: None,
+                resulting_content: None,
+            file_path: None,
             })
         }
     }

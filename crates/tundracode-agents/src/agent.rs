@@ -3,14 +3,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tundracode_models::ModelConfig;
 
-use crate::r#loop::AgentLoop;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentContext {
     pub workspace_path: String,
     pub model_config: ModelConfig,
     pub autonomous_mode: bool,
     pub budget_tokens: u32,
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +29,7 @@ pub enum AgentOutput {
         proposals: Vec<DiffProposal>,
         invocations: Vec<ToolInvocation>,
         tool_log: Vec<String>,
+        tokens_used: u32,
     },
     Error(String),
 }
@@ -71,35 +71,4 @@ pub trait Agent: Send + Sync {
     fn system_prompt(&self) -> String;
     fn allowed_tools(&self) -> Vec<&'static str>;
     async fn run(&self, context: &AgentContext, input: AgentInput) -> anyhow::Result<AgentOutput>;
-}
-
-pub struct AgentRunner {
-    loop_engine: AgentLoop,
-}
-
-impl AgentRunner {
-    pub fn new() -> Self {
-        Self {
-            loop_engine: AgentLoop::new(),
-        }
-    }
-
-    pub async fn run_agent(
-        &self,
-        agent: &dyn Agent,
-        context: &AgentContext,
-        input: AgentInput,
-    ) -> anyhow::Result<AgentOutput> {
-        agent.run(context, input).await
-    }
-
-    pub fn loop_engine(&self) -> &AgentLoop {
-        &self.loop_engine
-    }
-}
-
-impl Default for AgentRunner {
-    fn default() -> Self {
-        Self::new()
-    }
 }

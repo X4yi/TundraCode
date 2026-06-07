@@ -111,6 +111,14 @@ impl Tool for WriteFileTool {
 
         let prior = tokio::fs::read_to_string(&full_path).await.ok();
 
+        if context.dry_run {
+            return Ok(
+                ToolResult::ok(format!("Archivo {} escrito (dry-run)", path))
+                    .with_prior(prior, Some(path.to_string()))
+                    .with_resulting_content(Some(content.to_string())),
+            );
+        }
+
         if let Some(parent) = full_path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 ToolError::ExecutionFailed(format!("Cannot create directory: {}", e))
@@ -119,7 +127,8 @@ impl Tool for WriteFileTool {
 
         match tokio::fs::write(&full_path, content).await {
             Ok(_) => Ok(ToolResult::ok(format!("Archivo {} escrito", path))
-                .with_prior(prior, Some(path.to_string()))),
+                .with_prior(prior, Some(path.to_string()))
+                .with_resulting_content(Some(content.to_string()))),
             Err(e) => Ok(ToolResult::err(e.to_string())),
         }
     }
@@ -165,6 +174,14 @@ impl Tool for CreateFileTool {
             )));
         }
 
+        if context.dry_run {
+            return Ok(
+                ToolResult::ok(format!("Archivo {} creado (dry-run)", path))
+                    .with_prior(None, Some(path.to_string()))
+                    .with_resulting_content(Some(content.to_string())),
+            );
+        }
+
         if let Some(parent) = full_path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 ToolError::ExecutionFailed(format!("Cannot create directory: {}", e))
@@ -173,7 +190,8 @@ impl Tool for CreateFileTool {
 
         match tokio::fs::write(&full_path, content).await {
             Ok(_) => Ok(ToolResult::ok(format!("Archivo {} creado", path))
-                .with_prior(None, Some(path.to_string()))),
+                .with_prior(None, Some(path.to_string()))
+                .with_resulting_content(Some(content.to_string()))),
             Err(e) => Ok(ToolResult::err(e.to_string())),
         }
     }
@@ -219,9 +237,18 @@ impl Tool for DeleteFileTool {
 
         let prior = tokio::fs::read_to_string(&full_path).await.ok();
 
+        if context.dry_run {
+            return Ok(
+                ToolResult::ok(format!("Archivo {} eliminado (dry-run)", path))
+                    .with_prior(prior, Some(path.to_string()))
+                    .with_resulting_content(Some(String::new())),
+            );
+        }
+
         match tokio::fs::remove_file(&full_path).await {
             Ok(_) => Ok(ToolResult::ok(format!("Archivo {} eliminado", path))
-                .with_prior(prior, Some(path.to_string()))),
+                .with_prior(prior, Some(path.to_string()))
+                .with_resulting_content(Some(String::new()))),
             Err(e) => Ok(ToolResult::err(e.to_string())),
         }
     }

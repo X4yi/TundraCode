@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tundracode_agents::{
     r#loop::{AgentLoop, RunConfig},
-    Agent, AgentContext, AgentInput, AgentOutput, AskAgent, BuildAgent, PlanAgent, ToolInvocation,
+    Agent, AgentContext, AgentInput, AgentOutput, AskAgent, BuildAgent, PlanAgent,
 };
 use tundracode_models::{
     get_all_providers, get_provider_by_id, ModelConfig, ProviderInfo, ProviderModel,
@@ -345,6 +345,7 @@ async fn run_agent_ask(
     message: String,
     provider_id: String,
     model_id: String,
+    reasoning_effort: Option<String>,
     state: State<'_, SharedState>,
     orchestrator: State<'_, Arc<AgentOrchestrator>>,
 ) -> Result<String, String> {
@@ -378,15 +379,14 @@ async fn run_agent_ask(
         model: model_id,
         api_key,
         base_url: Some(base_url),
-        temperature: 0.7,
-        max_tokens: 4096,
     };
 
     let context = AgentContext {
         workspace_path: workspace.to_string_lossy().to_string(),
         model_config,
         autonomous_mode: false,
-        budget_tokens: 200000,
+        budget_tokens: u32::MAX,
+        reasoning_effort,
     };
 
     let input = AgentInput {
@@ -415,12 +415,15 @@ async fn run_agent_ask(
 
 #[tauri::command]
 async fn generate_plan(
+    run_id: String,
     description: String,
     provider_id: String,
     model_id: String,
+    reasoning_effort: Option<String>,
     state: State<'_, SharedState>,
     orchestrator: State<'_, Arc<AgentOrchestrator>>,
-) -> Result<String, String> {
+    app_handle: AppHandle,
+) -> Result<serde_json::Value, String> {
     let workspace = {
         let guard = state.lock().await;
         guard
@@ -451,17 +454,17 @@ async fn generate_plan(
         model: model_id,
         api_key,
         base_url: Some(base_url),
-        temperature: 0.2,
-        max_tokens: 8192,
     };
 
     let context = AgentContext {
         workspace_path: workspace.to_string_lossy().to_string(),
         model_config,
         autonomous_mode: false,
-        budget_tokens: 200000,
+        budget_tokens: u32::MAX,
+        reasoning_effort,
     };
 
+    let description_clone = description.clone();
     let input = AgentInput {
         user_message: description,
         plan_annotations: None,
@@ -469,15 +472,136 @@ async fn generate_plan(
     };
 
     let agent = PlanAgent;
-    let result = tokio::select! {
-        output = agent.run(&context, input) => output,
-        _ = cancel.cancelled() => Ok(AgentOutput::Error("Agent cancelled".to_string())),
+    let run_id_for_task = run_id.clone();
+    let app_for_task = app_handle.clone();
+
+    let on_event = {
+        let run_id = run_id.clone();
+        let app_handle = app_handle.clone();
+        move |event: tundracode_models::StreamEvent| {
+            use tundracode_models::StreamEvent;
+            match event {
+                StreamEvent::Token(_) => {}
+                StreamEvent::ReasoningToken(t) => {
+                    let _ = app_handle.emit(
+                        "agent-reasoning",
+                        AgentChunkPayload {
+                            run_id: run_id.clone(),
+                            chunk: t,
+                        },
+                    );
+                }
+                StreamEvent::ToolCallStart { name, call_id, file_path } => {
+                    let _ = app_handle.emit(
+                        "agent-tool-call",
+                        AgentToolCallPayload {
+                            run_id: run_id.clone(),
+                            tool_name: name,
+                            call_id,
+                            file_path,
+                        },
+                    );
+                }
+                StreamEvent::ToolCallDelta { .. } => {}
+                StreamEvent::ToolCallEnd { call_id, file_path } => {
+                    if let Some(path) = file_path {
+                        let _ = app_handle.emit(
+                            "agent-tool-call",
+                            AgentToolCallPayload {
+                                run_id: run_id.clone(),
+                                tool_name: String::new(),
+                                call_id,
+                                file_path: Some(path),
+                            },
+                        );
+                    }
+                }
+                StreamEvent::Done(_) => {}
+                StreamEvent::Error(e) => {
+                    let _ = app_handle.emit(
+                        "agent-error",
+                        AgentErrorPayload {
+                            run_id: run_id.clone(),
+                            error: e,
+                        },
+                    );
+                }
+            }
+        }
     };
+
+    let result: anyhow::Result<AgentOutput> = tokio::spawn(async move {
+        tokio::select! {
+            output = agent.run_with_streaming(&context, input, Some(Box::new(on_event))) => output,
+            _ = cancel.cancelled() => {
+                let _ = app_for_task.emit(
+                    "agent-error",
+                    AgentErrorPayload {
+                        run_id: run_id_for_task,
+                        error: "Plan agent cancelled".to_string(),
+                    },
+                );
+                Err(anyhow::anyhow!("Plan agent cancelled"))
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("Plan task join failed: {}", e))?;
 
     *orchestrator.running.write().await = false;
 
     match result {
-        Ok(AgentOutput::FinalAnswer { content, .. }) => Ok(content),
+        Ok(AgentOutput::FinalAnswer { content, tokens_used }) => {
+            let plans_dir = workspace.join(".tundracode/plans");
+            tokio::fs::create_dir_all(&plans_dir)
+                .await
+                .map_err(|e| format!("Cannot create plans dir: {}", e))?;
+
+            let slug = description_clone
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-')
+                .take(50)
+                .collect::<String>()
+                .trim()
+                .replace(' ', "-")
+                .to_lowercase();
+            let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+            let filename = format!("{}-{}.md", ts, slug);
+            let plan_path = plans_dir.join(&filename);
+
+            tokio::fs::write(&plan_path, &content)
+                .await
+                .map_err(|e| format!("Cannot write plan file: {}", e))?;
+
+            let title = content
+                .lines()
+                .find(|l| l.starts_with('#'))
+                .map(|l| l.trim_start_matches('#').trim().to_string())
+                .unwrap_or_else(|| description_clone.chars().take(60).collect());
+
+            let summary = content
+                .lines()
+                .skip_while(|l| l.starts_with('#') || l.starts_with('-') || l.trim().is_empty() || *l == "---")
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            let _ = app_handle.emit(
+                "agent-done",
+                AgentDonePayload {
+                    run_id,
+                    tokens_used,
+                    finish_reason: "stop".to_string(),
+                },
+            );
+
+            Ok(serde_json::json!({
+                "title": title,
+                "file_path": plan_path.to_string_lossy(),
+                "summary": summary,
+                "content": content,
+            }))
+        }
         Ok(AgentOutput::Error(e)) => Err(e),
         Ok(AgentOutput::ProposedChanges { .. }) => {
             Err("Unexpected output from Plan agent".to_string())
@@ -543,6 +667,229 @@ async fn load_plan(path: String, state: State<'_, SharedState>) -> Result<String
 }
 
 #[tauri::command]
+async fn open_plan_in_editor(
+    path: String,
+) -> Result<String, String> {
+    std::fs::read_to_string(&path).map_err(|e| format!("Cannot read plan file: {}", e))
+}
+
+#[tauri::command]
+async fn implement_plan_with_agent(
+    plan_path: String,
+    task_numbers: Option<Vec<usize>>,
+    provider_id: String,
+    model_id: String,
+    reasoning_effort: Option<String>,
+    state: State<'_, SharedState>,
+    orchestrator: State<'_, Arc<AgentOrchestrator>>,
+    app_handle: AppHandle,
+) -> Result<String, String> {
+    let workspace = {
+        let guard = state.lock().await;
+        guard
+            .workspace_path
+            .as_ref()
+            .ok_or("No hay workspace abierto")?
+            .clone()
+    };
+
+    let plan_content = std::fs::read_to_string(&plan_path)
+        .map_err(|e| format!("Cannot read plan file: {}", e))?;
+
+    let user_message = match task_numbers {
+        Some(numbers) if !numbers.is_empty() => {
+            let mut filtered_tasks = Vec::new();
+            let mut current_task = String::new();
+            let mut current_task_num = 0;
+
+            for line in plan_content.lines() {
+                if line.starts_with("### Task ") {
+                    if !current_task.is_empty() && numbers.contains(&current_task_num) {
+                        filtered_tasks.push(current_task.clone());
+                    }
+                    current_task.clear();
+                    current_task_num = line
+                        .trim_start_matches("### Task ")
+                        .split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    current_task.push_str(line);
+                    current_task.push('\n');
+                } else if !current_task.is_empty() {
+                    current_task.push_str(line);
+                    current_task.push('\n');
+                }
+            }
+            if !current_task.is_empty() && numbers.contains(&current_task_num) {
+                filtered_tasks.push(current_task);
+            }
+
+            if filtered_tasks.is_empty() {
+                format!(
+                    "Implement the following plan. Read each file mentioned, understand the current code, and make the changes described:\n\n{}",
+                    plan_content
+                )
+            } else {
+                format!(
+                    "Implement ONLY the following tasks from the plan. Read each file mentioned, understand the current code, and make the changes described for these specific tasks:\n\n{}",
+                    filtered_tasks.join("\n")
+                )
+            }
+        }
+        _ => format!(
+            "Implement the following plan. Read each file mentioned, understand the current code, and make the changes described:\n\n{}",
+            plan_content
+        ),
+    };
+
+    let cancel = CancellationToken::new();
+    *orchestrator.cancel_token.write().await = Some(cancel.clone());
+    *orchestrator.running.write().await = true;
+
+    let provider =
+        get_provider_by_id(&provider_id).ok_or(format!("Provider not found: {}", provider_id))?;
+
+    let api_key = tundracode_models::credentials::get_api_key(&provider_id)
+        .ok()
+        .flatten();
+
+    let base_url = tundracode_models::credentials::get_base_url(&provider_id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| provider.base_url.clone());
+
+    let model_config = tundracode_models::ModelConfig {
+        provider: provider_id,
+        model: model_id,
+        api_key,
+        base_url: Some(base_url),
+    };
+
+    let context = AgentContext {
+        workspace_path: workspace.to_string_lossy().to_string(),
+        model_config,
+        autonomous_mode: true,
+        budget_tokens: u32::MAX,
+        reasoning_effort,
+    };
+
+    let input = AgentInput {
+        user_message,
+        plan_annotations: None,
+        memory_excerpt: None,
+    };
+
+    let agent = BuildAgent;
+    let run_id = format!("build_{}", chrono::Utc::now().format("%Y%m%d%H%M%S"));
+    let run_id_for_task = run_id.clone();
+    let app_for_task = app_handle.clone();
+
+    let on_event = {
+        let run_id = run_id.clone();
+        let app_handle = app_handle.clone();
+        move |event: tundracode_models::StreamEvent| {
+            use tundracode_models::StreamEvent;
+            match event {
+                StreamEvent::Token(t) => {
+                    let _ = app_handle.emit(
+                        "agent-chunk",
+                        AgentChunkPayload {
+                            run_id: run_id.clone(),
+                            chunk: t,
+                        },
+                    );
+                }
+                StreamEvent::ReasoningToken(t) => {
+                    let _ = app_handle.emit(
+                        "agent-reasoning",
+                        AgentChunkPayload {
+                            run_id: run_id.clone(),
+                            chunk: t,
+                        },
+                    );
+                }
+                StreamEvent::ToolCallStart { name, call_id, file_path } => {
+                    let _ = app_handle.emit(
+                        "agent-tool-call",
+                        AgentToolCallPayload {
+                            run_id: run_id.clone(),
+                            tool_name: name,
+                            call_id,
+                            file_path,
+                        },
+                    );
+                }
+                StreamEvent::ToolCallDelta { .. } => {}
+                StreamEvent::ToolCallEnd { call_id, file_path } => {
+                    if let Some(path) = file_path {
+                        let _ = app_handle.emit(
+                            "agent-tool-call",
+                            AgentToolCallPayload {
+                                run_id: run_id.clone(),
+                                tool_name: String::new(),
+                                call_id,
+                                file_path: Some(path),
+                            },
+                        );
+                    }
+                }
+                StreamEvent::Done(_) => {}
+                StreamEvent::Error(e) => {
+                    let _ = app_handle.emit(
+                        "agent-error",
+                        AgentErrorPayload {
+                            run_id: run_id.clone(),
+                            error: e,
+                        },
+                    );
+                }
+            }
+        }
+    };
+
+    let result: anyhow::Result<AgentOutput> = tokio::spawn(async move {
+        tokio::select! {
+            output = agent.run_with_streaming(&context, input, Some(Box::new(on_event))) => output,
+            _ = cancel.cancelled() => {
+                let _ = app_for_task.emit(
+                    "agent-error",
+                    AgentErrorPayload {
+                        run_id: run_id_for_task,
+                        error: "Build agent cancelled".to_string(),
+                    },
+                );
+                Err(anyhow::anyhow!("Build agent cancelled"))
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("Build task join failed: {}", e))?;
+
+    *orchestrator.running.write().await = false;
+
+    let (output_tokens, result_str) = match result {
+        Ok(AgentOutput::FinalAnswer { content, tokens_used }) => (tokens_used, Ok(content)),
+        Ok(AgentOutput::ProposedChanges { tokens_used, .. }) => {
+            (tokens_used, Ok("Plan implemented successfully".to_string()))
+        }
+        Ok(AgentOutput::Error(e)) => (0, Err(e)),
+        Err(e) => (0, Err(e.to_string())),
+    };
+
+    let _ = app_handle.emit(
+        "agent-done",
+        AgentDonePayload {
+            run_id: run_id.clone(),
+            tokens_used: output_tokens,
+            finish_reason: "stop".to_string(),
+        },
+    );
+
+    result_str
+}
+
+#[tauri::command]
 async fn read_memory(state: State<'_, SharedState>) -> Result<String, String> {
     let workspace = {
         let guard = state.lock().await;
@@ -581,8 +928,6 @@ pub struct AgentConfigInput {
     pub agent_id: String,
     pub provider: String,
     pub model: String,
-    pub temperature: f32,
-    pub max_tokens: u32,
 }
 
 #[tauri::command]
@@ -597,8 +942,6 @@ async fn save_agent_config(
     settings.agents.insert(input.agent_id.clone(), tundracode_config::AgentSettings {
         model: input.model,
         provider: input.provider,
-        temperature: input.temperature,
-        max_tokens: input.max_tokens,
     });
 
     storage.save(&settings)
@@ -1497,6 +1840,7 @@ async fn send_completion(
     run_id: String,
     provider_id: String,
     model_id: String,
+    reasoning_effort: Option<String>,
     messages: Vec<ChatMessage>,
     system_prompt: Option<String>,
     state: State<'_, SharedState>,
@@ -1528,8 +1872,6 @@ async fn send_completion(
         model: model_id,
         api_key,
         base_url: Some(base_url),
-        temperature: 0.7,
-        max_tokens: 4096,
     };
 
     let registry = ProviderRegistry::new();
@@ -1555,6 +1897,7 @@ async fn send_completion(
     let tool_context = ToolContext {
         workspace_path: workspace.to_string_lossy().to_string(),
         agent_id: "chat".to_string(),
+        dry_run: false,
     };
 
     let last_user = messages
@@ -1572,7 +1915,6 @@ async fn send_completion(
     });
 
     let (tx_chunk, mut rx_chunk) = mpsc::channel::<String>(64);
-    let (tx_tool, mut rx_tool) = mpsc::channel::<ToolInvocation>(32);
 
     let app_for_chunks = app_handle.clone();
     let run_id_for_chunks = run_id.clone();
@@ -1588,23 +1930,65 @@ async fn send_completion(
         }
     });
 
-    let app_for_tools = app_handle.clone();
-    let run_id_for_tools = run_id.clone();
-    let tool_task = tokio::spawn(async move {
-        while let Some(inv) = rx_tool.recv().await {
-            let _ = app_for_tools.emit(
-                "agent-tool-call",
-                AgentToolCallPayload {
-                    run_id: run_id_for_tools.clone(),
-                    tool_name: inv.tool_name.clone(),
-                    call_id: inv.call_id.clone(),
-                    file_path: inv.file_path.clone(),
-                },
-            );
+    let on_event = {
+        let tx_chunk = tx_chunk.clone();
+        let run_id = run_id.clone();
+        let app_handle = app_handle.clone();
+        move |event: tundracode_models::StreamEvent| {
+            use tundracode_models::StreamEvent;
+            match event {
+                StreamEvent::Token(t) => {
+                    let _ = tx_chunk.try_send(t);
+                }
+                StreamEvent::ReasoningToken(t) => {
+                    let _ = app_handle.emit(
+                        "agent-reasoning",
+                        AgentChunkPayload {
+                            run_id: run_id.clone(),
+                            chunk: t,
+                        },
+                    );
+                }
+                StreamEvent::ToolCallStart { name, call_id, file_path } => {
+                    let _ = app_handle.emit(
+                        "agent-tool-call",
+                        AgentToolCallPayload {
+                            run_id: run_id.clone(),
+                            tool_name: name,
+                            call_id,
+                            file_path,
+                        },
+                    );
+                }
+                StreamEvent::ToolCallDelta { .. } => {}
+                StreamEvent::ToolCallEnd { call_id, file_path } => {
+                    if let Some(path) = file_path {
+                        let _ = app_handle.emit(
+                            "agent-tool-call",
+                            AgentToolCallPayload {
+                                run_id: run_id.clone(),
+                                tool_name: String::new(),
+                                call_id,
+                                file_path: Some(path),
+                            },
+                        );
+                    }
+                }
+                StreamEvent::Done(_) => {}
+                StreamEvent::Error(e) => {
+                    let _ = app_handle.emit(
+                        "agent-error",
+                        AgentErrorPayload {
+                            run_id: run_id.clone(),
+                            error: e,
+                        },
+                    );
+                }
+            }
         }
-    });
+    };
 
-    let agent_loop = AgentLoop::new().with_max_iterations(8);
+    let agent_loop = AgentLoop::new().with_max_iterations(20);
     let run_config = RunConfig {
         provider_registry: &registry,
         tool_registry: &tool_registry,
@@ -1614,13 +1998,13 @@ async fn send_completion(
         system_prompt: &system,
         user_message: &last_user,
         tools: &tool_definitions,
+        reasoning_effort,
+        on_event: Some(Box::new(on_event)),
     };
 
     let result = agent_loop.run(run_config).await;
     drop(tx_chunk);
-    drop(tx_tool);
     let _ = chunk_task.await;
-    let _ = tool_task.await;
 
     let output = match result {
         Ok(out) => out,
@@ -1679,6 +2063,7 @@ async fn run_build_agent(
     plan_annotations: Option<String>,
     provider_id: String,
     model_id: String,
+    reasoning_effort: Option<String>,
     state: State<'_, SharedState>,
     orchestrator: State<'_, Arc<AgentOrchestrator>>,
     app_handle: AppHandle,
@@ -1704,26 +2089,19 @@ async fn run_build_agent(
         .flatten()
         .unwrap_or_else(|| provider.base_url.clone());
 
-    let per_agent = load_agent_settings_for("build").await.ok().flatten();
-    let (temperature, max_tokens) = match per_agent {
-        Some(s) => (s.temperature, s.max_tokens),
-        None => (0.2, 8192),
-    };
-
     let model_config = ModelConfig {
         provider: provider_id.clone(),
         model: model_id,
         api_key,
         base_url: Some(base_url),
-        temperature,
-        max_tokens,
     };
 
     let context = AgentContext {
         workspace_path: workspace.to_string_lossy().to_string(),
         model_config,
         autonomous_mode: false,
-        budget_tokens: 200_000,
+        budget_tokens: u32::MAX,
+        reasoning_effort,
     };
 
     let input = AgentInput {
@@ -1739,9 +2117,73 @@ async fn run_build_agent(
     let agent = BuildAgent;
     let run_id_for_task = run_id.clone();
     let app_for_task = app_handle.clone();
+
+    let on_event = {
+        let run_id = run_id.clone();
+        let app_handle = app_handle.clone();
+        move |event: tundracode_models::StreamEvent| {
+            use tundracode_models::StreamEvent;
+            match event {
+                StreamEvent::Token(t) => {
+                    let _ = app_handle.emit(
+                        "agent-chunk",
+                        AgentChunkPayload {
+                            run_id: run_id.clone(),
+                            chunk: t,
+                        },
+                    );
+                }
+                StreamEvent::ReasoningToken(t) => {
+                    let _ = app_handle.emit(
+                        "agent-reasoning",
+                        AgentChunkPayload {
+                            run_id: run_id.clone(),
+                            chunk: t,
+                        },
+                    );
+                }
+                StreamEvent::ToolCallStart { name, call_id, file_path } => {
+                    let _ = app_handle.emit(
+                        "agent-tool-call",
+                        AgentToolCallPayload {
+                            run_id: run_id.clone(),
+                            tool_name: name,
+                            call_id,
+                            file_path,
+                        },
+                    );
+                }
+                StreamEvent::ToolCallDelta { .. } => {}
+                StreamEvent::ToolCallEnd { call_id, file_path } => {
+                    if let Some(path) = file_path {
+                        let _ = app_handle.emit(
+                            "agent-tool-call",
+                            AgentToolCallPayload {
+                                run_id: run_id.clone(),
+                                tool_name: String::new(),
+                                call_id,
+                                file_path: Some(path),
+                            },
+                        );
+                    }
+                }
+                StreamEvent::Done(_) => {}
+                StreamEvent::Error(e) => {
+                    let _ = app_handle.emit(
+                        "agent-error",
+                        AgentErrorPayload {
+                            run_id: run_id.clone(),
+                            error: e,
+                        },
+                    );
+                }
+            }
+        }
+    };
+
     let result: anyhow::Result<AgentOutput> = tokio::spawn(async move {
         tokio::select! {
-            output = agent.run(&context, input) => output,
+            output = agent.run_with_streaming(&context, input, Some(Box::new(on_event))) => output,
             _ = cancel.cancelled() => {
                 let _ = app_for_task.emit(
                     "agent-error",
@@ -1762,7 +2204,7 @@ async fn run_build_agent(
     let output = result.map_err(|e| format!("Build agent failed: {}", e))?;
 
     let proposals = match output {
-        AgentOutput::ProposedChanges { proposals, tool_log, invocations } => {
+        AgentOutput::ProposedChanges { proposals, tool_log, invocations, tokens_used } => {
             persist_proposals(&proposals, &workspace).await.ok();
             for inv in &invocations {
                 let _ = app_handle.emit(
@@ -1779,7 +2221,7 @@ async fn run_build_agent(
                 "agent-done",
                 AgentDonePayload {
                     run_id: run_id.clone(),
-                    tokens_used: tool_log.len() as u32,
+                    tokens_used,
                     finish_reason: "stop".to_string(),
                 },
             );
@@ -1806,9 +2248,8 @@ async fn accept_diff(
             .clone()
     };
 
-    let proposals_dir = dirs::config_dir()
-        .ok_or("Cannot find config directory")?
-        .join("tundracode")
+    let proposals_dir = workspace
+        .join(".tundracode")
         .join("proposals");
 
     let proposal_path = proposals_dir.join(format!("{}.json", proposal_id));
@@ -1823,32 +2264,27 @@ async fn accept_diff(
     let proposal: tundracode_agents::DiffProposal =
         serde_json::from_str(&content).map_err(|e| format!("Failed to parse proposal: {}", e))?;
 
-    let tool_registry = ToolRegistry::new();
-    let tool_context = ToolContext {
-        workspace_path: workspace.to_string_lossy().to_string(),
-        agent_id: "user".to_string(),
-    };
+    let file_path = workspace.join(&proposal.file_path);
 
-    let params = match proposal.unified_diff.is_empty() {
-        true => serde_json::json!({
-            "path": proposal.file_path,
-            "content": proposal.after
-        }),
-        false => serde_json::json!({
-            "path": proposal.file_path,
-            "diff": proposal.unified_diff
-        }),
-    };
-
-    let tool_name = match proposal.unified_diff.is_empty() {
-        true => "WriteFile",
-        false => "ApplyPatch",
-    };
-
-    tool_registry
-        .execute(&tool_context, tool_name, params)
-        .await
-        .map_err(|e| format!("Failed to apply: {}", e))?;
+    match proposal.kind {
+        tundracode_agents::DiffKind::Create | tundracode_agents::DiffKind::Modify => {
+            if let Some(parent) = file_path.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| format!("Cannot create directory: {}", e))?;
+            }
+            tokio::fs::write(&file_path, &proposal.after)
+                .await
+                .map_err(|e| format!("Cannot write file: {}", e))?;
+        }
+        tundracode_agents::DiffKind::Delete => {
+            if file_path.exists() {
+                tokio::fs::remove_file(&file_path)
+                    .await
+                    .map_err(|e| format!("Cannot delete file: {}", e))?;
+            }
+        }
+    }
 
     tokio::fs::remove_file(&proposal_path)
         .await
@@ -1858,20 +2294,62 @@ async fn accept_diff(
 }
 
 #[tauri::command]
-async fn reject_diff(proposal_id: String) -> Result<String, String> {
-    let proposals_dir = dirs::config_dir()
-        .ok_or("Cannot find config directory")?
-        .join("tundracode")
+async fn reject_diff(proposal_id: String, state: State<'_, SharedState>) -> Result<String, String> {
+    let workspace = {
+        let guard = state.lock().await;
+        guard
+            .workspace_path
+            .as_ref()
+            .ok_or("No hay workspace abierto")?
+            .clone()
+    };
+
+    let proposals_dir = workspace
+        .join(".tundracode")
         .join("proposals");
 
     let proposal_path = proposals_dir.join(format!("{}.json", proposal_id));
+
     if proposal_path.exists() {
+        let content = tokio::fs::read_to_string(&proposal_path)
+            .await
+            .map_err(|e| format!("Failed to read proposal: {}", e))?;
+
+        let proposal: tundracode_agents::DiffProposal =
+            serde_json::from_str(&content).map_err(|e| format!("Failed to parse proposal: {}", e))?;
+
+        let file_path = workspace.join(&proposal.file_path);
+
+        match proposal.kind {
+            tundracode_agents::DiffKind::Create => {
+                if file_path.exists() {
+                    let _ = tokio::fs::remove_file(&file_path).await;
+                }
+            }
+            tundracode_agents::DiffKind::Modify => {
+                if !proposal.before.is_empty() {
+                    if let Some(parent) = file_path.parent() {
+                        let _ = tokio::fs::create_dir_all(parent).await;
+                    }
+                    let _ = tokio::fs::write(&file_path, &proposal.before).await;
+                }
+            }
+            tundracode_agents::DiffKind::Delete => {
+                if !proposal.before.is_empty() && !file_path.exists() {
+                    if let Some(parent) = file_path.parent() {
+                        let _ = tokio::fs::create_dir_all(parent).await;
+                    }
+                    let _ = tokio::fs::write(&file_path, &proposal.before).await;
+                }
+            }
+        }
+
         tokio::fs::remove_file(&proposal_path)
             .await
             .map_err(|e| format!("Failed to remove proposal: {}", e))?;
     }
 
-    Ok("Proposal rejected and removed".to_string())
+    Ok("Proposal rejected and rolled back".to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1909,6 +2387,16 @@ fn tundracode_home() -> std::path::PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")))
         .join("tundracode")
+}
+
+fn sessions_dir() -> std::path::PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let flatpak_dir = home.join(".var/app/com.tundracode.dev");
+    if flatpak_dir.exists() {
+        flatpak_dir.join("sessions")
+    } else {
+        tundracode_home().join("sessions")
+    }
 }
 
 fn now_iso() -> String {
@@ -2048,11 +2536,10 @@ async fn persist_proposals(
     proposals: &[tundracode_agents::DiffProposal],
     workspace: &std::path::Path,
 ) -> Result<(), String> {
-    let dir = tundracode_home().join("proposals");
+    let dir = workspace.join(".tundracode").join("proposals");
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| format!("Cannot create proposals dir: {}", e))?;
-    let _ = workspace; // not used in path, but kept for future per-workspace storage
     for p in proposals {
         let file = dir.join(format!("{}.json", p.id));
         let content = serde_json::to_string_pretty(p)
@@ -2064,15 +2551,246 @@ async fn persist_proposals(
     Ok(())
 }
 
-async fn load_agent_settings_for(
-    agent_id: &str,
-) -> Result<Option<tundracode_config::AgentSettings>, String> {
-    let storage = tundracode_config::ConfigStorage::new()
-        .map_err(|e| format!("Cannot open config storage: {}", e))?;
-    let settings = storage
-        .load()
-        .map_err(|e| format!("Cannot load settings: {}", e))?;
-    Ok(settings.agents.get(agent_id).cloned())
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub filename: String,
+    pub title: String,
+    pub date: String,
+    pub model: String,
+    pub tokens: u64,
+    pub mode: String,
+}
+
+#[tauri::command]
+async fn save_session(
+    title: String,
+    history_json: String,
+    model: String,
+    tokens: u64,
+    mode: String,
+) -> Result<String, String> {
+    let dir = sessions_dir();
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("Cannot create sessions dir: {}", e))?;
+
+    let slug = title
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-')
+        .take(50)
+        .collect::<String>()
+        .trim()
+        .replace(' ', "-")
+        .to_lowercase();
+    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let filename = format!("{}-{}.md", ts, slug);
+
+    let history: Vec<serde_json::Value> = serde_json::from_str(&history_json)
+        .map_err(|e| format!("Cannot parse history: {}", e))?;
+
+    let mut content = format!(
+        "# Session: {}\n- Date: {}\n- Model: {}\n- Tokens: {}\n- Mode: {}\n\n---\n\n",
+        title,
+        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S"),
+        model,
+        tokens,
+        mode,
+    );
+
+    for msg in &history {
+        let role = msg["role"].as_str().unwrap_or("user");
+        let text = msg["content"].as_str().unwrap_or("");
+        let label = if role == "user" { "User" } else { "Assistant" };
+        content.push_str(&format!("## {}\n{}\n\n", label, text));
+    }
+
+    let path = dir.join(&filename);
+    tokio::fs::write(&path, content)
+        .await
+        .map_err(|e| format!("Cannot write session: {}", e))?;
+
+    Ok(filename)
+}
+
+#[tauri::command]
+async fn load_session(
+    filename: String,
+) -> Result<SessionInfo, String> {
+    let dir = sessions_dir();
+    let path = dir.join(&filename);
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| format!("Cannot read session: {}", e))?;
+
+    let mut title = String::new();
+    let mut date = String::new();
+    let mut model = String::new();
+    let mut tokens = 0u64;
+    let mut mode = String::new();
+    let mut history = Vec::new();
+
+    let mut current_role = String::new();
+    let mut current_text = String::new();
+
+    for line in content.lines() {
+        if let Some(t) = line.strip_prefix("# Session: ") {
+            title = t.to_string();
+        } else if let Some(d) = line.strip_prefix("- Date: ") {
+            date = d.to_string();
+        } else if let Some(m) = line.strip_prefix("- Model: ") {
+            model = m.to_string();
+        } else if let Some(t) = line.strip_prefix("- Tokens: ") {
+            tokens = t.parse().unwrap_or(0);
+        } else if let Some(m) = line.strip_prefix("- Mode: ") {
+            mode = m.to_string();
+        } else if line == "---" {
+            continue;
+        } else if let Some(r) = line.strip_prefix("## ") {
+            if !current_role.is_empty() && !current_text.trim().is_empty() {
+                history.push(serde_json::json!({
+                    "role": current_role,
+                    "content": current_text.trim(),
+                }));
+            }
+            current_role = if r == "User" { "user".to_string() } else { "assistant".to_string() };
+            current_text.clear();
+        } else if !line.starts_with("- ") && !line.starts_with("# ") {
+            if !current_text.is_empty() {
+                current_text.push('\n');
+            }
+            current_text.push_str(line);
+        }
+    }
+
+    if !current_role.is_empty() && !current_text.trim().is_empty() {
+        history.push(serde_json::json!({
+            "role": current_role,
+            "content": current_text.trim(),
+        }));
+    }
+
+    Ok(SessionInfo {
+        filename,
+        title,
+        date,
+        model,
+        tokens,
+        mode,
+    })
+}
+
+#[tauri::command]
+async fn load_session_history(
+    filename: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let dir = sessions_dir();
+    let path = dir.join(&filename);
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| format!("Cannot read session: {}", e))?;
+
+    let mut history = Vec::new();
+    let mut current_role = String::new();
+    let mut current_text = String::new();
+
+    for line in content.lines() {
+        if line.starts_with("# Session:") || line.starts_with("- ") || line == "---" {
+            continue;
+        } else if let Some(r) = line.strip_prefix("## ") {
+            if !current_role.is_empty() && !current_text.trim().is_empty() {
+                history.push(serde_json::json!({
+                    "role": current_role,
+                    "content": current_text.trim(),
+                }));
+            }
+            current_role = if r == "User" { "user".to_string() } else { "assistant".to_string() };
+            current_text.clear();
+        } else {
+            if !current_text.is_empty() {
+                current_text.push('\n');
+            }
+            current_text.push_str(line);
+        }
+    }
+
+    if !current_role.is_empty() && !current_text.trim().is_empty() {
+        history.push(serde_json::json!({
+            "role": current_role,
+            "content": current_text.trim(),
+        }));
+    }
+
+    Ok(history)
+}
+
+#[tauri::command]
+async fn list_sessions() -> Result<Vec<SessionInfo>, String> {
+    let dir = sessions_dir();
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = tokio::fs::read_dir(&dir)
+        .await
+        .map_err(|e| format!("Cannot read sessions dir: {}", e))?;
+
+    let mut sessions = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(|e| format!("Read dir error: {}", e))? {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".md") {
+            continue;
+        }
+        let content = tokio::fs::read_to_string(entry.path())
+            .await
+            .unwrap_or_default();
+
+        let mut title = name.clone();
+        let mut date = String::new();
+        let mut model = String::new();
+        let mut tokens = 0u64;
+        let mut mode = String::new();
+
+        for line in content.lines() {
+            if let Some(t) = line.strip_prefix("# Session: ") {
+                title = t.to_string();
+            } else if let Some(d) = line.strip_prefix("- Date: ") {
+                date = d.to_string();
+            } else if let Some(m) = line.strip_prefix("- Model: ") {
+                model = m.to_string();
+            } else if let Some(t) = line.strip_prefix("- Tokens: ") {
+                tokens = t.parse().unwrap_or(0);
+            } else if let Some(m) = line.strip_prefix("- Mode: ") {
+                mode = m.to_string();
+            }
+        }
+
+        sessions.push(SessionInfo {
+            filename: name,
+            title,
+            date,
+            model,
+            tokens,
+            mode,
+        });
+    }
+
+    sessions.sort_by(|a, b| b.date.cmp(&a.date));
+    Ok(sessions)
+}
+
+#[tauri::command]
+async fn delete_session(
+    filename: String,
+) -> Result<String, String> {
+    let dir = sessions_dir();
+    let path = dir.join(&filename);
+    if !path.exists() {
+        return Err("Session not found".to_string());
+    }
+    tokio::fs::remove_file(&path)
+        .await
+        .map_err(|e| format!("Cannot delete session: {}", e))?;
+    Ok("Session deleted".to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2121,6 +2839,8 @@ pub fn run() {
             agent_status,
             list_plans,
             load_plan,
+            open_plan_in_editor,
+            implement_plan_with_agent,
             read_memory,
             write_memory,
             get_providers,
@@ -2149,6 +2869,11 @@ pub fn run() {
             add_diff_comment,
             list_diff_comments,
             resolve_diff_comment,
+            save_session,
+            load_session,
+            load_session_history,
+            list_sessions,
+            delete_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
