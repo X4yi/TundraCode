@@ -6,11 +6,14 @@ use crate::tool_format::{ToolCall, ToolDefinition};
 pub enum StreamEvent {
     Token(String),
     ReasoningToken(String),
-    ToolCallStart { name: String, call_id: String, file_path: Option<String> },
+    ToolCallStart { name: String, call_id: String, file_path: Option<String>, arguments: Option<serde_json::Value> },
     ToolCallDelta { call_id: String, arguments_delta: String },
     ToolCallEnd { call_id: String, file_path: Option<String> },
     Done(CompletionResponse),
     Error(String),
+    ContextCompacted { message: String },
+    SubagentStart { agent_id: String, task: String },
+    SubagentComplete { agent_id: String, duration_ms: u64, success: bool },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -250,4 +253,6 @@ pub struct ProviderModel {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
+    pub context_window: Option<u32>,
+    pub max_output_tokens: Option<u32>,
 }

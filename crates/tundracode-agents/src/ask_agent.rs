@@ -1,8 +1,13 @@
 use async_trait::async_trait;
+use std::path::Path;
 use tundracode_models::{ProviderRegistry, StreamEvent, ToolDefinition};
 use tundracode_tools::ToolRegistry;
 
 use crate::agent::{Agent, AgentContext, AgentInput, AgentOutput};
+use crate::compaction::{CompactionConfig, ContextCompactor};
+use crate::context_manager::ContextManager;
+use crate::memory::load_memory;
+use crate::profile::AgentProfileRegistry;
 use crate::r#loop::{AgentLoop, RunOutput};
 
 pub struct AskAgent;
@@ -14,42 +19,7 @@ impl Agent for AskAgent {
     }
 
     fn system_prompt(&self) -> String {
-        r#"Eres el agente Ask de TundraCode. Respondes preguntas sobre el codigo sin modificar archivos.
-
-## Herramientas
-- ReadFile: Leer archivos relevantes para responder.
-- SearchCodebase: Encontrar patrones, usos y definiciones.
-- SearchInWeb: Investigaciones externas cuando sea necesario.
-
-## Reglas Fundamentales
-1. **SOLO LECTURA**: Nunca modifiques archivos del proyecto.
-2. **Precicion**: Respuestas exactas basadas en evidencia del codigo.
-3. **Concisión**: Se breve pero completo. Sin informacion innecesaria.
-
-## Tool Calling
-- Usa ReadFile para contexto especifico de archivos.
-- Usa SearchCodebase para patrones amplios (donde se usa X, que implementa Y).
-- Usa SearchInWeb solo cuando el codigo no tiene la respuesta.
-
-## Flujo
-1. Entiende la pregunta del usuario.
-2. Busca evidencia en el codigo fuente.
-3. Si es necesario, investiga externamente.
-4. Responde con claridad y precision.
-5. Incluye ubicaciones exactas (archivo:linea) cuando sea relevante.
-
-## Formato de Respuesta
-- Respuesta directa primero.
-- Evidencia del codigo despues.
-- Referencias a archivos/lineas especificas.
-- Si hay multiples interpretaciones, mencionalas.
-
-## Casos Especiales
-- Si no encuentras informacion, di "No encontre evidencia en el codigo".
-- Si la pregunta es ambigua, pide clarificacion.
-- Si hay archivos abiertos, referencialos cuando sea relevante.
-- Si la respuesta requiere investigacion externa, indica que la buscaste y donde."#
-            .to_string()
+        include_str!("prompts/ask.txt").to_string()
     }
 
     fn allowed_tools(&self) -> Vec<&'static str> {
@@ -59,7 +29,12 @@ impl Agent for AskAgent {
     async fn run(&self, context: &AgentContext, input: AgentInput) -> anyhow::Result<AgentOutput> {
         let provider_registry = ProviderRegistry::new();
         let mut tool_registry = ToolRegistry::new();
-        tool_registry.register_subset(&self.allowed_tools());
+        #[allow(deprecated)]
+        tool_registry.register_subset_legacy(&self.allowed_tools());
+        tool_registry.register(Box::new(crate::task_tool::TaskTool::new(
+            context.clone(),
+            AgentProfileRegistry::new(),
+        )));
 
         let tool_context = tundracode_tools::ToolContext {
             workspace_path: context.workspace_path.clone(),
@@ -69,9 +44,17 @@ impl Agent for AskAgent {
 
         let tools = self.build_tool_definitions(&tool_registry);
 
-        let agent_loop = AgentLoop::new()
+        let context_budget = 128_000u32;
+        let context_manager = ContextManager::new(context_budget);
+        let compactor = ContextCompactor::new(CompactionConfig::default());
+        let memory_store = load_memory(Path::new(&context.workspace_path));
+
+        let mut agent_loop = AgentLoop::new()
             .with_max_iterations(20)
-            .with_budget_tokens(u32::MAX);
+            .with_budget_tokens(context_budget / 2)
+            .with_context_manager(context_manager)
+            .with_compactor(compactor)
+            .with_memory_store(memory_store);
         let run_config = crate::r#loop::RunConfig {
             provider_registry: &provider_registry,
             tool_registry: &tool_registry,
@@ -88,6 +71,7 @@ impl Agent for AskAgent {
             content,
             invocations: _,
             tokens_used,
+            context_compacted: _,
         } = agent_loop.run(run_config).await?;
 
         Ok(AgentOutput::FinalAnswer {
@@ -106,7 +90,12 @@ impl AskAgent {
     ) -> anyhow::Result<AgentOutput> {
         let provider_registry = ProviderRegistry::new();
         let mut tool_registry = ToolRegistry::new();
-        tool_registry.register_subset(&self.allowed_tools());
+        #[allow(deprecated)]
+        tool_registry.register_subset_legacy(&self.allowed_tools());
+        tool_registry.register(Box::new(crate::task_tool::TaskTool::new(
+            context.clone(),
+            AgentProfileRegistry::new(),
+        )));
 
         let tool_context = tundracode_tools::ToolContext {
             workspace_path: context.workspace_path.clone(),
@@ -116,9 +105,17 @@ impl AskAgent {
 
         let tools = self.build_tool_definitions(&tool_registry);
 
-        let agent_loop = AgentLoop::new()
+        let context_budget = 128_000u32;
+        let context_manager = ContextManager::new(context_budget);
+        let compactor = ContextCompactor::new(CompactionConfig::default());
+        let memory_store = load_memory(Path::new(&context.workspace_path));
+
+        let mut agent_loop = AgentLoop::new()
             .with_max_iterations(20)
-            .with_budget_tokens(u32::MAX);
+            .with_budget_tokens(context_budget / 2)
+            .with_context_manager(context_manager)
+            .with_compactor(compactor)
+            .with_memory_store(memory_store);
         let run_config = crate::r#loop::RunConfig {
             provider_registry: &provider_registry,
             tool_registry: &tool_registry,
@@ -135,6 +132,7 @@ impl AskAgent {
             content,
             invocations: _,
             tokens_used,
+            context_compacted: _,
         } = agent_loop.run(run_config).await?;
 
         Ok(AgentOutput::FinalAnswer {

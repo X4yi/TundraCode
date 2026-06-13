@@ -2,37 +2,22 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::path::Path;
 
-use crate::{Tool, ToolContext, ToolError, ToolResult};
+use crate::{Tool, ToolCategory, ToolContext, ToolError, ToolResult};
+use tundracode_permissions::Capability;
+use tundracode_security::path_guard::{ensure_within_workspace, is_tundracode_path};
 
-pub fn validate_path(context: &ToolContext, path: &str) -> Result<std::path::PathBuf, ToolError> {
+fn resolve_path(context: &ToolContext, path: &str) -> Result<std::path::PathBuf, ToolError> {
     let workspace = Path::new(&context.workspace_path);
-    let full_path = workspace.join(path);
+    let target = if Path::new(path).is_absolute() {
+        Path::new(path).to_path_buf()
+    } else {
+        workspace.join(path)
+    };
 
-    let canonical_workspace = workspace
-        .canonicalize()
-        .map_err(|e| ToolError::ExecutionFailed(format!("Cannot resolve workspace: {}", e)))?;
+    ensure_within_workspace(workspace, &target)
+        .map_err(|e| ToolError::ExecutionFailed(e))?;
 
-    let canonical = full_path
-        .canonicalize()
-        .unwrap_or_else(|_| full_path.clone());
-
-    if !canonical.starts_with(&canonical_workspace) {
-        return Err(ToolError::ExecutionFailed(format!(
-            "Path '{}' is outside the workspace",
-            path
-        )));
-    }
-
-    Ok(full_path)
-}
-
-fn is_tundracode_path(path: &std::path::Path) -> bool {
-    path.components().any(|c| {
-        c.as_os_str()
-            .to_str()
-            .map(|s| s == ".tundracode")
-            .unwrap_or(false)
-    })
+    Ok(target)
 }
 
 pub struct ReadFileTool;
@@ -43,22 +28,22 @@ impl Tool for ReadFileTool {
         "ReadFile"
     }
     fn description(&self) -> &'static str {
-        "Lee el contenido de un archivo del workspace"
+        "ReadFile: reads a file from the workspace. Param: p (path)"
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::FileSystem
+    }
+    fn required_capabilities(&self) -> Vec<Capability> {
+        vec![Capability::FileRead { path_pattern: None }]
     }
     fn parameters_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Ruta del archivo relativa al workspace" }
-            },
-            "required": ["path"]
-        })
+        serde_json::json!({"properties":{"p":{"type":"string"}},"required":["p"]})
     }
     async fn execute(&self, context: &ToolContext, params: Value) -> Result<ToolResult, ToolError> {
-        let path = params["path"]
+        let path = params["p"]
             .as_str()
-            .ok_or_else(|| ToolError::InvalidParameters("path required".to_string()))?;
-        let full_path = validate_path(context, path)?;
+            .ok_or_else(|| ToolError::InvalidParameters("p required".to_string()))?;
+        let full_path = resolve_path(context, path)?;
 
         if is_tundracode_path(&full_path) {
             return Err(ToolError::ExecutionFailed(
@@ -84,24 +69,23 @@ impl Tool for WriteFileTool {
         "WriteFile"
     }
     fn description(&self) -> &'static str {
-        "Escribe contenido completo en un archivo"
+        "WriteFile: writes content to a file. Params: p (path), c (content)"
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::FileSystem
+    }
+    fn required_capabilities(&self) -> Vec<Capability> {
+        vec![Capability::FileWrite { path_pattern: None }]
     }
     fn parameters_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "content": { "type": "string" }
-            },
-            "required": ["path", "content"]
-        })
+        serde_json::json!({"properties":{"p":{"type":"string"},"c":{"type":"string"}},"required":["p","c"]})
     }
     async fn execute(&self, context: &ToolContext, params: Value) -> Result<ToolResult, ToolError> {
-        let path = params["path"]
+        let path = params["p"]
             .as_str()
-            .ok_or_else(|| ToolError::InvalidParameters("path required".to_string()))?;
-        let content = params["content"].as_str().unwrap_or("");
-        let full_path = validate_path(context, path)?;
+            .ok_or_else(|| ToolError::InvalidParameters("p required".to_string()))?;
+        let content = params["c"].as_str().unwrap_or("");
+        let full_path = resolve_path(context, path)?;
 
         if is_tundracode_path(&full_path) {
             return Err(ToolError::ExecutionFailed(
@@ -113,7 +97,7 @@ impl Tool for WriteFileTool {
 
         if context.dry_run {
             return Ok(
-                ToolResult::ok(format!("Archivo {} escrito (dry-run)", path))
+                ToolResult::ok(format!("File {} written (dry-run)", path))
                     .with_prior(prior, Some(path.to_string()))
                     .with_resulting_content(Some(content.to_string())),
             );
@@ -126,7 +110,7 @@ impl Tool for WriteFileTool {
         }
 
         match tokio::fs::write(&full_path, content).await {
-            Ok(_) => Ok(ToolResult::ok(format!("Archivo {} escrito", path))
+            Ok(_) => Ok(ToolResult::ok(format!("File {} written", path))
                 .with_prior(prior, Some(path.to_string()))
                 .with_resulting_content(Some(content.to_string()))),
             Err(e) => Ok(ToolResult::err(e.to_string())),
@@ -142,24 +126,23 @@ impl Tool for CreateFileTool {
         "CreateFile"
     }
     fn description(&self) -> &'static str {
-        "Crea un archivo nuevo. Falla si el archivo ya existe."
+        "CreateFile: creates a new file. Fails if exists. Params: p (path), c (content optional)"
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::FileSystem
+    }
+    fn required_capabilities(&self) -> Vec<Capability> {
+        vec![Capability::FileWrite { path_pattern: None }]
     }
     fn parameters_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "content": { "type": "string", "default": "" }
-            },
-            "required": ["path"]
-        })
+        serde_json::json!({"properties":{"p":{"type":"string"},"c":{"type":"string"}},"required":["p"]})
     }
     async fn execute(&self, context: &ToolContext, params: Value) -> Result<ToolResult, ToolError> {
-        let path = params["path"]
+        let path = params["p"]
             .as_str()
-            .ok_or_else(|| ToolError::InvalidParameters("path required".to_string()))?;
-        let content = params["content"].as_str().unwrap_or("");
-        let full_path = validate_path(context, path)?;
+            .ok_or_else(|| ToolError::InvalidParameters("p required".to_string()))?;
+        let content = params["c"].as_str().unwrap_or("");
+        let full_path = resolve_path(context, path)?;
 
         if is_tundracode_path(&full_path) {
             return Err(ToolError::ExecutionFailed(
@@ -176,7 +159,7 @@ impl Tool for CreateFileTool {
 
         if context.dry_run {
             return Ok(
-                ToolResult::ok(format!("Archivo {} creado (dry-run)", path))
+                ToolResult::ok(format!("File {} created (dry-run)", path))
                     .with_prior(None, Some(path.to_string()))
                     .with_resulting_content(Some(content.to_string())),
             );
@@ -189,7 +172,7 @@ impl Tool for CreateFileTool {
         }
 
         match tokio::fs::write(&full_path, content).await {
-            Ok(_) => Ok(ToolResult::ok(format!("Archivo {} creado", path))
+            Ok(_) => Ok(ToolResult::ok(format!("File {} created", path))
                 .with_prior(None, Some(path.to_string()))
                 .with_resulting_content(Some(content.to_string()))),
             Err(e) => Ok(ToolResult::err(e.to_string())),
@@ -205,22 +188,22 @@ impl Tool for DeleteFileTool {
         "DeleteFile"
     }
     fn description(&self) -> &'static str {
-        "Elimina un archivo. Requiere confirmacion del usuario."
+        "DeleteFile: deletes a file. Param: p (path)"
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::FileSystem
+    }
+    fn required_capabilities(&self) -> Vec<Capability> {
+        vec![Capability::FileDelete { path_pattern: None }]
     }
     fn parameters_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" }
-            },
-            "required": ["path"]
-        })
+        serde_json::json!({"properties":{"p":{"type":"string"}},"required":["p"]})
     }
     async fn execute(&self, context: &ToolContext, params: Value) -> Result<ToolResult, ToolError> {
-        let path = params["path"]
+        let path = params["p"]
             .as_str()
-            .ok_or_else(|| ToolError::InvalidParameters("path required".to_string()))?;
-        let full_path = validate_path(context, path)?;
+            .ok_or_else(|| ToolError::InvalidParameters("p required".to_string()))?;
+        let full_path = resolve_path(context, path)?;
 
         if is_tundracode_path(&full_path) {
             return Err(ToolError::ExecutionFailed(
@@ -239,14 +222,14 @@ impl Tool for DeleteFileTool {
 
         if context.dry_run {
             return Ok(
-                ToolResult::ok(format!("Archivo {} eliminado (dry-run)", path))
+                ToolResult::ok(format!("File {} deleted (dry-run)", path))
                     .with_prior(prior, Some(path.to_string()))
                     .with_resulting_content(Some(String::new())),
             );
         }
 
         match tokio::fs::remove_file(&full_path).await {
-            Ok(_) => Ok(ToolResult::ok(format!("Archivo {} eliminado", path))
+            Ok(_) => Ok(ToolResult::ok(format!("File {} deleted", path))
                 .with_prior(prior, Some(path.to_string()))
                 .with_resulting_content(Some(String::new()))),
             Err(e) => Ok(ToolResult::err(e.to_string())),
@@ -262,20 +245,20 @@ impl Tool for ListDirectoryTool {
         "ListDirectory"
     }
     fn description(&self) -> &'static str {
-        "Lista el contenido de un directorio"
+        "ListDirectory: lists directory contents. Param: p (path, default '.')"
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::FileSystem
+    }
+    fn required_capabilities(&self) -> Vec<Capability> {
+        vec![Capability::ListDirectory { path_pattern: None }]
     }
     fn parameters_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" }
-            },
-            "required": ["path"]
-        })
+        serde_json::json!({"properties":{"p":{"type":"string"}},"required":[]})
     }
     async fn execute(&self, context: &ToolContext, params: Value) -> Result<ToolResult, ToolError> {
-        let path = params["path"].as_str().unwrap_or(".");
-        let full_path = validate_path(context, path)?;
+        let path = params["p"].as_str().unwrap_or(".");
+        let full_path = resolve_path(context, path)?;
 
         if is_tundracode_path(&full_path) {
             return Err(ToolError::ExecutionFailed(
@@ -310,7 +293,13 @@ impl Tool for GetWorkspaceTool {
         "GetWorkspace"
     }
     fn description(&self) -> &'static str {
-        "Devuelve la estructura general del proyecto, excluyendo .tundracode, target, node_modules, .git"
+        "Returns the general project structure, excluding .tundracode, target, node_modules, .git"
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::FileSystem
+    }
+    fn required_capabilities(&self) -> Vec<Capability> {
+        vec![Capability::ListDirectory { path_pattern: None }]
     }
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
@@ -348,5 +337,108 @@ impl Tool for GetWorkspaceTool {
 
         let tree = walk_dir(workspace, "", &excluded);
         Ok(ToolResult::ok(tree.join("\n")))
+    }
+}
+
+fn validate_plan_path(context: &ToolContext, path: &str) -> Result<std::path::PathBuf, ToolError> {
+    if !path.starts_with(".tundracode/plans/") && !path.starts_with(".tundracode/plans") {
+        return Err(ToolError::ExecutionFailed(format!(
+            "Path '{}' must be inside .tundracode/plans/",
+            path
+        )));
+    }
+    let workspace = std::path::Path::new(&context.workspace_path);
+    let full_path = workspace.join(path);
+    Ok(full_path)
+}
+
+pub struct PlanCreateFileTool;
+
+#[async_trait]
+impl Tool for PlanCreateFileTool {
+    fn name(&self) -> &'static str {
+        "PlanCreateFile"
+    }
+    fn description(&self) -> &'static str {
+        "PlanCreateFile: creates a plan file. Only writes to .tundracode/plans/. Fails if exists. Params: p (path), c (content)"
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Planning
+    }
+    fn required_capabilities(&self) -> Vec<Capability> {
+        vec![Capability::FileWrite { path_pattern: None }]
+    }
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({"properties":{"p":{"type":"string"},"c":{"type":"string"}},"required":["p","c"]})
+    }
+    async fn execute(&self, context: &ToolContext, params: Value) -> Result<ToolResult, ToolError> {
+        let path = params["p"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidParameters("p required".to_string()))?;
+        let content = params["c"].as_str().unwrap_or("");
+        let full_path = validate_plan_path(context, path)?;
+
+        if full_path.exists() {
+            return Err(ToolError::ExecutionFailed(format!(
+                "Plan file already exists: {}",
+                path
+            )));
+        }
+
+        if let Some(parent) = full_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                ToolError::ExecutionFailed(format!("Cannot create directory: {}", e))
+            })?;
+        }
+
+        match tokio::fs::write(&full_path, content).await {
+            Ok(_) => Ok(ToolResult::ok(format!("Plan {} created", path))
+                .with_prior(None, Some(path.to_string()))
+                .with_resulting_content(Some(content.to_string()))),
+            Err(e) => Ok(ToolResult::err(e.to_string())),
+        }
+    }
+}
+
+pub struct PlanWriteFileTool;
+
+#[async_trait]
+impl Tool for PlanWriteFileTool {
+    fn name(&self) -> &'static str {
+        "PlanWriteFile"
+    }
+    fn description(&self) -> &'static str {
+        "PlanWriteFile: writes to a plan file. Only writes to .tundracode/plans/. Params: p (path), c (content)"
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Planning
+    }
+    fn required_capabilities(&self) -> Vec<Capability> {
+        vec![Capability::FileWrite { path_pattern: None }]
+    }
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({"properties":{"p":{"type":"string"},"c":{"type":"string"}},"required":["p","c"]})
+    }
+    async fn execute(&self, context: &ToolContext, params: Value) -> Result<ToolResult, ToolError> {
+        let path = params["p"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidParameters("p required".to_string()))?;
+        let content = params["c"].as_str().unwrap_or("");
+        let full_path = validate_plan_path(context, path)?;
+
+        let prior = tokio::fs::read_to_string(&full_path).await.ok();
+
+        if let Some(parent) = full_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                ToolError::ExecutionFailed(format!("Cannot create directory: {}", e))
+            })?;
+        }
+
+        match tokio::fs::write(&full_path, content).await {
+            Ok(_) => Ok(ToolResult::ok(format!("Plan {} written", path))
+                .with_prior(prior, Some(path.to_string()))
+                .with_resulting_content(Some(content.to_string()))),
+            Err(e) => Ok(ToolResult::err(e.to_string())),
+        }
     }
 }

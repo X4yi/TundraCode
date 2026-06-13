@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.tundracode.dev</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>TundraCode</name>
+  <summary>AI-powered code editor</summary>
+  <description>
+    <p>
+      TundraCode is a modern, AI-powered code editor built with Tauri v2.
+      It provides intelligent code assistance, syntax highlighting, and a
+      seamless development experience.
+    </p>
+    <p>
+      Features include:
+    </p>
+    <ul>
+      <li>AI-powered code completion and suggestions</li>
+      <li>Multi-language syntax highlighting</li>
+      <li>Integrated terminal</li>
+      <li>Git integration</li>
+      <li>Modern, responsive UI</li>
+    </ul>
+  </description>
+  <url type="homepage">https://github.com/tundracode/tundracode</url>
+  <url type="bugtracker">https://github.com/tundracode/tundracode/issues</url>
+  <launchable type="desktop-id">com.tundracode.dev.desktop</launchable>
+  <provides>
+    <binary>tundracode</binary>
+  </provides>
+  <categories>
+    <category>Development</category>
+    <category>IDE</category>
+  </categories>
+  <keywords>
+    <keyword>code</keyword>
+    <keyword>editor</keyword>
+    <keyword>ai</keyword>
+    <keyword>development</keyword>
+    <keyword>programming</keyword>
+  </keywords>
+  <releases>
+    <release version="0.1.0" date="2026-06-09">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

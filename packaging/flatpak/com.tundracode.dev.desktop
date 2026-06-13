@@ -5,5 +5,6 @@ Exec=tundracode %U
 Icon=com.tundracode.dev
 Type=Application
 Categories=Development;IDE;
-Keywords=code;editor;ai;
+Keywords=code;editor;ai;python;javascript;typescript;rust;
+MimeType=text/plain;text/x-python;text/x-scriptython;application/javascript;application/typescript;text/x-c;text/x-csrc;text/x-chdr;text/x-java;text/x-rust;application/json;text/x-shellscript;
 StartupNotify=true

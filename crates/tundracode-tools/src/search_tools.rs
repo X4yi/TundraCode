@@ -4,7 +4,8 @@ use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
 
-use crate::{Tool, ToolContext, ToolError, ToolResult};
+use crate::{Tool, ToolCategory, ToolContext, ToolError, ToolResult};
+use tundracode_permissions::Capability;
 
 pub struct SearchCodebaseTool;
 
@@ -14,23 +15,22 @@ impl Tool for SearchCodebaseTool {
         "SearchCodebase"
     }
     fn description(&self) -> &'static str {
-        "Busca en el codebase usando ripgrep. Encuentra patrones, usos, funciones relacionadas."
+        "SearchCodebase: searches with ripgrep. Params: q (query), g (glob filter e.g. *.rs)"
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Search
+    }
+    fn required_capabilities(&self) -> Vec<Capability> {
+        vec![Capability::SearchCodebase]
     }
     fn parameters_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string", "description": "Termino de busqueda" },
-                "file_pattern": { "type": "string", "description": "Filtro de archivos (ej: '*.rs')" }
-            },
-            "required": ["query"]
-        })
+        serde_json::json!({"properties":{"q":{"type":"string"},"g":{"type":"string"}},"required":["q"]})
     }
     async fn execute(&self, context: &ToolContext, params: Value) -> Result<ToolResult, ToolError> {
-        let query = params["query"]
+        let query = params["q"]
             .as_str()
-            .ok_or_else(|| ToolError::InvalidParameters("query required".to_string()))?;
-        let file_pattern = params["file_pattern"].as_str();
+            .ok_or_else(|| ToolError::InvalidParameters("q required".to_string()))?;
+        let file_pattern = params["g"].as_str();
 
         let workspace = Path::new(&context.workspace_path);
 
@@ -73,7 +73,7 @@ impl Tool for SearchCodebaseTool {
                 error: Some(format!("ripgrep error: {}", stderr)),
                 prior_content: None,
                 resulting_content: None,
-            file_path: None,
+                file_path: None,
             });
         }
 
@@ -84,7 +84,7 @@ impl Tool for SearchCodebaseTool {
                 error: None,
                 prior_content: None,
                 resulting_content: None,
-            file_path: None,
+                file_path: None,
             });
         }
 
@@ -114,7 +114,7 @@ impl Tool for SearchCodebaseTool {
                 error: None,
                 prior_content: None,
                 resulting_content: None,
-            file_path: None,
+                file_path: None,
             })
         } else {
             Ok(ToolResult {
@@ -123,7 +123,7 @@ impl Tool for SearchCodebaseTool {
                 error: None,
                 prior_content: None,
                 resulting_content: None,
-            file_path: None,
+                file_path: None,
             })
         }
     }
@@ -137,23 +137,23 @@ impl Tool for SearchInWebTool {
         "SearchInWeb"
     }
     fn description(&self) -> &'static str {
-        "Busqueda web para investigaciones. Usa DuckDuckGo HTML (best-effort, sin API key)."
+        "SearchInWeb: web search via DuckDuckGo. Param: q (query)"
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Search
+    }
+    fn required_capabilities(&self) -> Vec<Capability> {
+        vec![Capability::SearchWeb]
     }
     fn parameters_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string" }
-            },
-            "required": ["query"]
-        })
+        serde_json::json!({"properties":{"q":{"type":"string"}},"required":["q"]})
     }
     async fn execute(
         &self,
         _context: &ToolContext,
         params: Value,
     ) -> Result<ToolResult, ToolError> {
-        let query = params["query"].as_str().unwrap_or("");
+        let query = params["q"].as_str().unwrap_or("");
 
         let url = format!(
             "https://html.duckduckgo.com/html/?q={}",
@@ -179,7 +179,7 @@ impl Tool for SearchInWebTool {
                 error: Some(format!("Search returned status: {}", status)),
                 prior_content: None,
                 resulting_content: None,
-            file_path: None,
+                file_path: None,
             });
         }
 
@@ -197,7 +197,7 @@ impl Tool for SearchInWebTool {
                 error: None,
                 prior_content: None,
                 resulting_content: None,
-            file_path: None,
+                file_path: None,
             })
         } else {
             let formatted = results
@@ -212,7 +212,7 @@ impl Tool for SearchInWebTool {
                 error: None,
                 prior_content: None,
                 resulting_content: None,
-            file_path: None,
+                file_path: None,
             })
         }
     }

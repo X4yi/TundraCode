@@ -9,6 +9,7 @@ members = [
     "crates/tundracode-git",
     "crates/tundracode-config",
     "crates/tundracode-security",
+    "crates/tundracode-permissions",
 ]
 resolver = "2"
 

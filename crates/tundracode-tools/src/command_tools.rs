@@ -4,7 +4,9 @@ use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
 
-use crate::{Tool, ToolContext, ToolError, ToolResult};
+use crate::{Tool, ToolCategory, ToolContext, ToolError, ToolResult};
+use tundracode_permissions::Capability;
+use tundracode_security::sandbox::CommandSandbox;
 
 pub struct RunCommandTool;
 
@@ -14,24 +16,22 @@ impl Tool for RunCommandTool {
         "RunCommand"
     }
     fn description(&self) -> &'static str {
-        "Ejecuta un comando de terminal en un sandbox controlado"
+        "RunCommand: executes a command in sandbox. Params: c (command), a (args[]), t (timeout_secs, def 60)"
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Command
+    }
+    fn required_capabilities(&self) -> Vec<Capability> {
+        vec![Capability::CommandExecute { allowed: vec![] }]
     }
     fn parameters_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "command": { "type": "string", "description": "Comando a ejecutar" },
-                "args": { "type": "array", "items": { "type": "string" } },
-                "timeout_seconds": { "type": "number", "default": 60 }
-            },
-            "required": ["command"]
-        })
+        serde_json::json!({"properties":{"c":{"type":"string"},"a":{"type":"array","items":{"type":"string"}},"t":{"type":"number"}},"required":["c"]})
     }
     async fn execute(&self, context: &ToolContext, params: Value) -> Result<ToolResult, ToolError> {
-        let command = params["command"]
+        let command = params["c"]
             .as_str()
-            .ok_or_else(|| ToolError::InvalidParameters("command required".to_string()))?;
-        let args: Vec<String> = params["args"]
+            .ok_or_else(|| ToolError::InvalidParameters("c required".to_string()))?;
+        let args: Vec<String> = params["a"]
             .as_array()
             .map(|a| {
                 a.iter()
@@ -39,9 +39,9 @@ impl Tool for RunCommandTool {
                     .collect()
             })
             .unwrap_or_default();
-        let timeout_secs = params["timeout_seconds"].as_u64().unwrap_or(60);
+        let timeout_secs = params["t"].as_u64().unwrap_or(60);
 
-        let sandbox = tundracode_security::CommandSandbox::new(&context.workspace_path);
+        let sandbox = CommandSandbox::new(&context.workspace_path);
         sandbox
             .validate_command(command, &args)
             .map_err(ToolError::ExecutionFailed)?;
@@ -66,16 +66,25 @@ impl Tool for RunCommandTool {
                 })?
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+
+        let exit_code = output.status.code().map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string());
+
+        let output_combined = if output.status.success() {
+            stdout_str
+        } else {
+            let err = if stderr_str.is_empty() { stdout_str.clone() } else { stderr_str };
+            format!("Exit code: {}\n{}", exit_code, err)
+        };
 
         Ok(ToolResult {
             success: output.status.success(),
-            output: stdout,
-            error: if stderr.is_empty() {
+            output: output_combined,
+            error: if output.status.success() {
                 None
             } else {
-                Some(stderr)
+                Some(format!("Command exited with code {}", exit_code))
             },
             prior_content: None,
             resulting_content: None,
@@ -92,19 +101,19 @@ impl Tool for GetDiagnosticsTool {
         "GetDiagnostics"
     }
     fn description(&self) -> &'static str {
-        "Obtiene errores y warnings del archivo. Para .rs usa cargo check, para .ts usa tsc --noEmit."
+        "GetDiagnostics: returns errors/warnings. .rs->cargo check, .ts->tsc. Param: f (file_path)"
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Diagnostics
+    }
+    fn required_capabilities(&self) -> Vec<Capability> {
+        vec![Capability::GetDiagnostics]
     }
     fn parameters_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "file_path": { "type": "string" }
-            },
-            "required": ["file_path"]
-        })
+        serde_json::json!({"properties":{"f":{"type":"string"}},"required":["f"]})
     }
     async fn execute(&self, context: &ToolContext, params: Value) -> Result<ToolResult, ToolError> {
-        let file_path = params["file_path"].as_str().unwrap_or("");
+        let file_path = params["f"].as_str().unwrap_or("");
 
         let ext = Path::new(file_path)
             .extension()
@@ -126,7 +135,7 @@ impl Tool for GetDiagnosticsTool {
                     error: None,
                     prior_content: None,
                     resulting_content: None,
-            file_path: None,
+                    file_path: None,
                 });
             }
         };
@@ -158,7 +167,7 @@ impl Tool for GetDiagnosticsTool {
                 error: None,
                 prior_content: None,
                 resulting_content: None,
-            file_path: None,
+                file_path: None,
             })
         } else {
             Ok(ToolResult {
@@ -171,7 +180,7 @@ impl Tool for GetDiagnosticsTool {
                 },
                 prior_content: None,
                 resulting_content: None,
-            file_path: None,
+                file_path: None,
             })
         }
     }

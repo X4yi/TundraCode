@@ -4,6 +4,10 @@ use tundracode_models::{ProviderRegistry, StreamEvent, ToolDefinition};
 use tundracode_tools::ToolRegistry;
 
 use crate::agent::{Agent, AgentContext, AgentInput, AgentOutput};
+use crate::compaction::{CompactionConfig, ContextCompactor};
+use crate::context_manager::ContextManager;
+use crate::memory::load_memory;
+use crate::profile::AgentProfileRegistry;
 use crate::r#loop::{AgentLoop, RunOutput};
 
 pub struct PlanAgent;
@@ -15,78 +19,7 @@ impl Agent for PlanAgent {
     }
 
     fn system_prompt(&self) -> String {
-        r#"Eres el agente Plan de TundraCode. Investigas, analizas y generas planes de implementacion tecnicos fundamentados con tareas discretas.
-
-## Herramientas
-- ReadFile / ListDirectory: Para entender la estructura del proyecto.
-- SearchCodebase: Para encontrar patrones y codigo existente.
-- SearchInWeb: Para investigar APIs, frameworks y mejores practicas.
-
-## Workflow Obligatorio
-
-### 1. Auditoria del Proyecto
-- Lee estructura del workspace y archivos clave.
-- Identifica stack tecnico, dependencias y convenciones.
-- Revisa .tundracode/memory.md si existe.
-- **NO estimimes tokens** - investiga el codigo real.
-
-### 2. Investigacion Externa
-- Usa SearchInWeb para documentacion oficial de APIs/frameworks.
-- Busca mejores practicas para la tarea especifica.
-- Verifica compatibilidad de versiones.
-- Incluye busquedas webs cuando sea necesario.
-
-### 3. Analisis Comparativo
-- Analiza posibles alternativas.
-- Analiza pros/contras de cada una.
-- Recomienda basandote en evidencia, no suposiciones.
-
-### 4. Generacion del Plan
-Estructura obligatoria:
-
-## Stack
-Justificacion de elecciones tecnicas. Lenguaje, frameworks, librerias, y por que.
-
-## Alternativas
-| Opcion | Pros | Contras | Veredicto |
-
-## Pasos
-Cada paso es una tarea discreta e implementable de forma independiente:
-
-### Task 1: {titulo descriptivo}
-- **Goal:** {objetivo claro y medible - que debe lograrse}
-- **Archivos:** {rutas exactas de archivos a crear/modificar}
-- **Herramientas:** {ApplyPatch, CreateFile, etc.}
-- **Depende de:** {nums de tasks previas, o "ninguna"}
-- **Criterio de aceptacion:** {como verificar que esta task esta completa}
-
-### Task 2: ...
-
-Reglas para las tasks:
-- Cada task debe ser implementable en 1-3 tool calls
-- Un task = una responsabilidad clara
-- Los goals deben ser verificables (compilar, pasar tests, etc.)
-- Las tasks deben tener dependencias claras
-- Numerar las tasks secuencialmente desde 1
-
-## Riesgos
-Riesgos identificados y mitigaciones.
-
-## Reglas
-- **NUNCA** modifiques o edites archivos del proyecto.
-- **NO estimes tokens** - investiga codigo real.
-- Usa evidencia del codigo existente para cada decision.
-- Si el workspace tiene stack definido, respetalo.
-- Plan conciso pero completo.
-- Incluye verificacion al final.
-- No uses emojis en el plan
-
-## Tool Calling
-- Usa herramientas de forma secuencial para investigar.
-- Primero entiende el codigo, luego busca documentacion externa.
-- Verifica que la informacion este actualizada.
-- Cita fuentes cuando sea posible."#
-            .to_string()
+        include_str!("prompts/plan.txt").to_string()
     }
 
     fn allowed_tools(&self) -> Vec<&'static str> {
@@ -96,18 +29,25 @@ Riesgos identificados y mitigaciones.
             "GetWorkspace",
             "SearchCodebase",
             "SearchInWeb",
+            "PlanCreateFile",
+            "PlanWriteFile",
         ]
     }
 
     async fn run(&self, context: &AgentContext, input: AgentInput) -> anyhow::Result<AgentOutput> {
         let provider_registry = ProviderRegistry::new();
         let mut tool_registry = ToolRegistry::new();
-        tool_registry.register_subset(&self.allowed_tools());
+        #[allow(deprecated)]
+        tool_registry.register_subset_legacy(&self.allowed_tools());
+        tool_registry.register(Box::new(crate::task_tool::TaskTool::new(
+            context.clone(),
+            AgentProfileRegistry::new(),
+        )));
 
         let tool_context = tundracode_tools::ToolContext {
             workspace_path: context.workspace_path.clone(),
             agent_id: "plan".to_string(),
-            dry_run: true,
+            dry_run: false,
         };
 
         let tools = self.build_tool_definitions(&tool_registry);
@@ -125,9 +65,19 @@ Riesgos identificados y mitigaciones.
             input.user_message.clone()
         };
 
-        let agent_loop = AgentLoop::new()
+        // Create context management infrastructure
+        let context_budget = 256_000u32;
+        let context_manager = ContextManager::new(context_budget);
+        let compactor = ContextCompactor::new(CompactionConfig::default());
+        let memory_store = load_memory(Path::new(&context.workspace_path));
+
+        let mut agent_loop = AgentLoop::new()
             .with_max_iterations(50)
-            .with_budget_tokens(u32::MAX);
+            .with_budget_tokens(128_000)
+            .with_context_manager(context_manager)
+            .with_compactor(compactor)
+            .with_memory_store(memory_store)
+            .with_subagent_mode(false);
         let run_config = crate::r#loop::RunConfig {
             provider_registry: &provider_registry,
             tool_registry: &tool_registry,
@@ -144,32 +94,8 @@ Riesgos identificados y mitigaciones.
             content,
             invocations: _,
             tokens_used,
+            context_compacted: _,
         } = agent_loop.run(run_config).await?;
-
-        let plan_slug = slugify(&input.user_message);
-        let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-        let plan_path = format!(
-            "{}/.tundracode/plans/{}_{}.md",
-            context.workspace_path, plan_slug, timestamp
-        );
-
-        if let Some(parent) = Path::new(&plan_path).parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-
-        let provider_name = &context.model_config.provider;
-        let model_name = &context.model_config.model;
-
-        let frontmatter = format!(
-            "---\ngenerated_at: {}\nprovider: {}/{}\nestimated_build_tokens: {}\n---\n\n",
-            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
-            provider_name,
-            model_name,
-            tokens_used * 3,
-        );
-
-        let plan_content = format!("{}{}", frontmatter, content);
-        let _ = std::fs::write(&plan_path, &plan_content);
 
         Ok(AgentOutput::FinalAnswer {
             content,
@@ -187,12 +113,17 @@ impl PlanAgent {
     ) -> anyhow::Result<AgentOutput> {
         let provider_registry = ProviderRegistry::new();
         let mut tool_registry = ToolRegistry::new();
-        tool_registry.register_subset(&self.allowed_tools());
+        #[allow(deprecated)]
+        tool_registry.register_subset_legacy(&self.allowed_tools());
+        tool_registry.register(Box::new(crate::task_tool::TaskTool::new(
+            context.clone(),
+            AgentProfileRegistry::new(),
+        )));
 
         let tool_context = tundracode_tools::ToolContext {
             workspace_path: context.workspace_path.clone(),
             agent_id: "plan".to_string(),
-            dry_run: true,
+            dry_run: false,
         };
 
         let tools = self.build_tool_definitions(&tool_registry);
@@ -210,9 +141,19 @@ impl PlanAgent {
             input.user_message.clone()
         };
 
-        let agent_loop = AgentLoop::new()
+        // Create context management infrastructure
+        let context_budget = 256_000u32;
+        let context_manager = ContextManager::new(context_budget);
+        let compactor = ContextCompactor::new(CompactionConfig::default());
+        let memory_store = load_memory(Path::new(&context.workspace_path));
+
+        let mut agent_loop = AgentLoop::new()
             .with_max_iterations(50)
-            .with_budget_tokens(u32::MAX);
+            .with_budget_tokens(128_000)
+            .with_context_manager(context_manager)
+            .with_compactor(compactor)
+            .with_memory_store(memory_store)
+            .with_subagent_mode(false);
         let run_config = crate::r#loop::RunConfig {
             provider_registry: &provider_registry,
             tool_registry: &tool_registry,
@@ -229,32 +170,8 @@ impl PlanAgent {
             content,
             invocations: _,
             tokens_used,
+            context_compacted: _,
         } = agent_loop.run(run_config).await?;
-
-        let plan_slug = slugify(&input.user_message);
-        let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-        let plan_path = format!(
-            "{}/.tundracode/plans/{}_{}.md",
-            context.workspace_path, plan_slug, timestamp
-        );
-
-        if let Some(parent) = Path::new(&plan_path).parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-
-        let provider_name = &context.model_config.provider;
-        let model_name = &context.model_config.model;
-
-        let frontmatter = format!(
-            "---\ngenerated_at: {}\nprovider: {}/{}\nestimated_build_tokens: {}\n---\n\n",
-            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
-            provider_name,
-            model_name,
-            tokens_used * 3,
-        );
-
-        let plan_content = format!("{}{}", frontmatter, content);
-        let _ = std::fs::write(&plan_path, &plan_content);
 
         Ok(AgentOutput::FinalAnswer {
             content,
@@ -279,17 +196,4 @@ impl PlanAgent {
 fn read_memory_md(workspace: &str) -> Option<String> {
     let path = Path::new(workspace).join(".tundracode/memory.md");
     std::fs::read_to_string(&path).ok()
-}
-
-fn slugify(text: &str) -> String {
-    text.chars()
-        .filter(|c| c.is_alphanumeric() || *c == ' ')
-        .collect::<String>()
-        .to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join("_")
-        .chars()
-        .take(50)
-        .collect()
 }

@@ -7,10 +7,10 @@ pub mod tool;
 
 pub use command_tools::{GetDiagnosticsTool, RunCommandTool};
 pub use fs_tools::{
-    CreateFileTool, DeleteFileTool, GetWorkspaceTool, ListDirectoryTool, ReadFileTool,
-    WriteFileTool,
+    CreateFileTool, DeleteFileTool, GetWorkspaceTool, ListDirectoryTool, PlanCreateFileTool,
+    PlanWriteFileTool, ReadFileTool, WriteFileTool,
 };
-pub use patch_tools::{generate_unified_diff, ApplyPatchTool};
-pub use registry::ToolRegistry;
+pub use patch_tools::{apply_unified_diff, generate_unified_diff, ApplyPatchTool};
+pub use registry::{ToolMiddleware, ToolRegistry};
 pub use search_tools::{SearchCodebaseTool, SearchInWebTool};
-pub use tool::{Tool, ToolContext, ToolError, ToolResult};
+pub use tool::{Tool, ToolCatalog, ToolCategory, ToolContext, ToolError, ToolResult};

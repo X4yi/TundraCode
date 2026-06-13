@@ -12,6 +12,7 @@ description = "Sistema de Tool Calling para agentes de TundraCode"
 [dependencies]
 tundracode-core = { path = "../tundracode-core" }
 tundracode-security = { path = "../tundracode-security" }
+tundracode-permissions = { path = "../tundracode-permissions" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

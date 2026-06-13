@@ -197,11 +197,12 @@ impl AnthropicProvider {
                         match event_type {
                             "content_block_start" => {
                                 if let Some(block) = json.get("content_block") {
-                                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                                    let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                    if block_type == "tool_use" {
                                         current_tool_id = block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                                         current_tool_name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                                         current_tool_args.clear();
-                                        on_event(StreamEvent::ToolCallStart { name: current_tool_name.clone(), call_id: current_tool_id.clone(), file_path: None });
+                                        on_event(StreamEvent::ToolCallStart { name: current_tool_name.clone(), call_id: current_tool_id.clone(), file_path: None, arguments: None });
                                     }
                                 }
                             }
@@ -213,6 +214,13 @@ impl AnthropicProvider {
                                             if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
                                                 content.push_str(text);
                                                 on_event(StreamEvent::Token(text.to_string()));
+                                            }
+                                        }
+                                        "thinking_delta" => {
+                                            if let Some(thinking) = delta.get("thinking").and_then(|t| t.as_str()) {
+                                                if !thinking.is_empty() {
+                                                    on_event(StreamEvent::ReasoningToken(thinking.to_string()));
+                                                }
                                             }
                                         }
                                         "input_json_delta" => {

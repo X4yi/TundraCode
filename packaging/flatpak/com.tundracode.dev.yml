@@ -1,9 +1,10 @@
 app-id: com.tundracode.dev
 runtime: org.gnome.Platform
-runtime-version: "46"
+runtime-version: "47"
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.node20
 command: tundracode
 
 finish-args:
@@ -12,26 +13,41 @@ finish-args:
   - --device=dri
   - --share=ipc
   - --share=network
-  - --filesystem=home
-  - --filesystem=host
+  - --socket=pulseaudio
   - --talk-name=org.freedesktop.secrets
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --env=FLATPAK=1
 
 modules:
   - name: tundracode
     buildsystem: simple
     build-options:
-      append-path: /usr/lib/sdk/rust-stable/bin
+      append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node20/bin
       env:
         CARGO_HOME: /run/build/tundracode/cargo
+        npm_config_cache: /run/build/tundracode/flatpak-node/npm-cache
+        npm_config_offline: "true"
     build-commands:
-      - cargo build --release --offline
-      - install -Dm755 target/release/tundracode -t /app/bin/
+      - mkdir -p src-tauri/.cargo
+      - |
+        cat > src-tauri/.cargo/config.toml << 'EOF'
+        [source.crates-io]
+        replace-with = "vendored-sources"
+
+        [source.vendored-sources]
+        directory = "/run/build/tundracode/cargo/vendor"
+        EOF
+      - npm ci --offline --legacy-peer-deps
+      - cargo --offline fetch --manifest-path src-tauri/Cargo.toml --verbose
+      - npm run tauri build -- --no-bundle
+      - install -Dm755 src-tauri/target/release/tundracode -t /app/bin/
       - install -Dm644 packaging/flatpak/com.tundracode.dev.desktop /app/share/applications/com.tundracode.dev.desktop
       - install -Dm644 packaging/flatpak/com.tundracode.dev.svg /app/share/icons/hicolor/scalable/apps/com.tundracode.dev.svg
+      - install -Dm644 packaging/flatpak/com.tundracode.dev.metainfo.xml /app/share/metainfo/com.tundracode.dev.metainfo.xml
     sources:
       - type: dir
         path: ../..
         dest: .
-      - type: file
-        path: cargo-sources.json
-        dest: .
+      - cargo-sources.json
+      - node-sources.json

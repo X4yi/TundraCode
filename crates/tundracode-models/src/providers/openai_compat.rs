@@ -242,6 +242,18 @@ impl OpenAiCompatProvider {
                                         }
                                     }
 
+                                    if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
+                                        if !reasoning.is_empty() {
+                                            on_event(StreamEvent::ReasoningToken(reasoning.to_string()));
+                                        }
+                                    }
+
+                                    if let Some(thinking) = delta.get("thinking").and_then(|t| t.as_str()) {
+                                        if !thinking.is_empty() {
+                                            on_event(StreamEvent::ReasoningToken(thinking.to_string()));
+                                        }
+                                    }
+
                     if let Some(tc_array) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                         for tc in tc_array {
                             let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
@@ -249,7 +261,7 @@ impl OpenAiCompatProvider {
                                 let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                                 let name = tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()).unwrap_or("").to_string();
                                 if !name.is_empty() {
-                                    on_event(StreamEvent::ToolCallStart { name: name.clone(), call_id: id.clone(), file_path: None });
+                                    on_event(StreamEvent::ToolCallStart { name: name.clone(), call_id: id.clone(), file_path: None, arguments: None });
                                 }
                                 (id, name, String::new())
                             });

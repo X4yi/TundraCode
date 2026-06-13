@@ -9,7 +9,7 @@
 <body>
     <header id="top-bar">
         <div class="top-bar-left">
-            <button id="explore-btn" class="btn-dropdown">
+            <button id="explore-btn" class="btn-dropdown" title="Explore workspace (Ctrl+Shift+O)">
                 <span>Explore</span>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="6 9 12 15 18 9"></polyline>
@@ -19,13 +19,13 @@
             </div>
         </div>
         <div class="top-bar-right">
-            <button id="settings-btn" class="btn-icon" title="Settings">
+            <button id="settings-btn" class="btn-icon" title="Settings (Ctrl+,)">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <circle cx="12" cy="12" r="3"></circle>
                     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
                 </svg>
             </button>
-            <button id="agents-toggle" class="btn-icon" title="Toggle panel de agentes">
+            <button id="agents-toggle" class="btn-icon" title="Toggle Agents Panel (Ctrl+B)">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <rect x="3" y="3" width="18" height="18" rx="2"></rect>
                     <line x1="9" y1="3" x2="9" y2="21"></line>
@@ -59,7 +59,7 @@
                 <div class="editor-highlights" aria-hidden="true">
                     <pre class="highlights-pre"><code id="highlights-code" class="highlights-code"></code></pre>
                 </div>
-                <textarea id="code-editor" spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
+                <div id="code-editor" class="code-editor-content" contenteditable="true" spellcheck="false" autocorrect="off" autocapitalize="off"></div>
                 <div id="md-preview-toggle" class="md-preview-toggle hidden">
                     <label class="toggle-switch">
                         <input type="checkbox" id="md-preview-checkbox">
@@ -67,8 +67,11 @@
                     </label>
                     <span class="toggle-label">Preview</span>
                 </div>
-                <div id="md-preview-container" class="md-preview-container hidden"></div>
-            </div>
+    <div id="md-preview-container" class="md-preview-container hidden"></div>
+    <div id="autocomplete-popup" class="autocomplete-popup hidden"></div>
+    <div id="editor-hover-tooltip" class="editor-hover-tooltip hidden"></div>
+    <div id="subagent-status-bar" class="subagent-status-bar hidden"></div>
+</div>
             <div id="plan-mode" class="editor-mode hidden">
                 <div id="plan-mode-body" class="plan-mode-body"></div>
                 <div id="plan-mode-comments" class="plan-mode-comments"></div>
@@ -93,13 +96,12 @@
 
         <aside id="agents-panel" class="agents-panel">
             <div class="panel-header">
-                <span class="panel-title">Agent</span>
-                <div class="panel-header-actions">
+                <div class="panel-header-left">
                     <div class="session-selector" style="position: relative;">
-                        <button class="session-selector-trigger" id="session-selector-btn" title="Sessions">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                                <polyline points="14 2 14 8 20 8"></polyline>
+                        <button class="session-selector-trigger" id="session-selector-btn" title="Sessions (Ctrl+Shift+N)">
+                            <span id="session-title-display" class="session-title-display">Session</span>
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="6 9 12 15 18 9"></polyline>
                             </svg>
                         </button>
                         <div class="session-dropdown hidden" id="session-dropdown">
@@ -117,34 +119,38 @@
                             </div>
                         </div>
                     </div>
+                </div>
+                <div class="panel-header-right">
                     <div class="model-selector" style="position: relative;">
-                        <button class="model-selector-trigger" id="model-selector-btn">
-                            <span class="model-name" id="current-model-name">No model selected</span>
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <polyline points="6 15 12 9 18 15"></polyline>
+                        <button class="model-selector-trigger" id="model-selector-btn" title="Select model">
+                            <span class="model-name" id="current-model-name">model</span>
+                            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="6 9 12 15 18 9"></polyline>
                             </svg>
                         </button>
                         <div class="model-dropdown hidden" id="model-dropdown"></div>
                     </div>
-                    <div class="tool-log-toggle" style="position: relative;">
-                        <button class="tool-log-toggle-btn" id="tool-log-toggle-btn" title="Toggle Tool Log" onclick="toggleToolLog()">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                                <polyline points="14 2 14 8 20 8"></polyline>
-                                <line x1="16" y1="13" x2="8" y2="13"></line>
-                                <line x1="16" y1="17" x2="8" y2="17"></line>
-                                <polyline points="10 9 9 9 8 9"></polyline>
-                            </svg>
-                        </button>
-                    </div>
-                    <div class="reasoning-selector">
-                        <select id="reasoning-effort" title="Reasoning effort">
-                            <option value="none">None</option>
-                            <option value="low">Low</option>
-                            <option value="medium" selected>Medium</option>
-                            <option value="high">High</option>
-                        </select>
-                    </div>
+                    <button class="tool-log-toggle-btn" id="tool-log-toggle-btn" title="Tool log (Ctrl+Shift+L)" onclick="toggleToolLog()">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                            <line x1="16" y1="13" x2="8" y2="13"></line>
+                            <line x1="16" y1="17" x2="8" y2="17"></line>
+                        </svg>
+                    </button>
+                    <select id="reasoning-effort" class="reasoning-select" title="Reasoning effort">
+                        <option value="none">−R</option>
+                        <option value="low">LR</option>
+                        <option value="medium" selected>MR</option>
+                        <option value="high">HR</option>
+                    </select>
+                    <button id="diff-toggle-btn" class="diff-toggle-btn" title="Pending diffs" onclick="toggleDiffPopup(event)" style="display:none">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="3" x2="12" y2="21"></line>
+                            <path d="M7 12l5-5 5 5M7 16l5-5 5 5"></path>
+                        </svg>
+                        <span id="diff-count-badge" class="diff-count-badge hidden">0</span>
+                    </button>
                 </div>
             </div>
 
@@ -155,27 +161,35 @@
                     </div>
                     <div id="tool-log-resize-handle" class="tool-log-resize-handle"></div>
                     <div id="tool-log-subpanel" class="tool-log-subpanel collapsed">
-                        <div class="tool-log-header" onclick="toggleToolLog()">
-                            <div class="tool-log-title">
-                                <svg class="tool-log-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <polyline points="6 9 12 15 18 9"></polyline>
+                        <div class="tool-log-info" id="tool-log-info">
+                            <div class="tool-log-info-row">
+                                <span class="tool-log-info-label">Model</span>
+                                <span class="tool-log-info-value" id="tl-model">--</span>
+                            </div>
+                            <div class="tool-log-info-row">
+                                <span class="tool-log-info-label">Session</span>
+                                <span class="tool-log-info-value" id="tl-session">--</span>
+                            </div>
+                            <div class="tool-log-info-row">
+                                <span class="tool-log-info-label">Tokens</span>
+                                <span class="tool-log-info-value" id="tl-tokens">In: 0 | Out: 0 | Total: 0</span>
+                            </div>
+                            <div class="tool-log-info-row">
+                                <span class="tool-log-info-label">Context</span>
+                                <span class="tool-log-info-value" id="tl-context">--</span>
+                            </div>
+                        </div>
+                        <div class="tool-log-toolbar" id="tool-log-toolbar">
+                            <input type="search" id="tool-log-search" placeholder="Filter..." class="tool-log-search" onkeydown="event.stopPropagation()" onclick="event.stopPropagation()">
+                            <select id="tool-log-filter" class="tool-log-filter" onchange="filterToolLog()" onclick="event.stopPropagation()">
+                                <option value="">All Tools</option>
+                            </select>
+                            <button id="tool-log-clear" class="btn-icon" title="Clear" onclick="clearToolLog(event)">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="3 6 5 6 21 6"></polyline>
+                                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
                                 </svg>
-                                <span>Tool Log</span>
-                            </div>
-                            <div class="tool-log-stats">
-                                <div class="tool-log-stat">
-                                    <span class="tool-log-stat-label">In:</span>
-                                    <span id="token-input" class="tool-log-stat-value">0</span>
-                                </div>
-                                <div class="tool-log-stat">
-                                    <span class="tool-log-stat-label">Out:</span>
-                                    <span id="token-output" class="tool-log-stat-value">0</span>
-                                </div>
-                                <div class="tool-log-stat">
-                                    <span class="tool-log-stat-label">Total:</span>
-                                    <span id="token-total" class="tool-log-stat-value">0</span>
-                                </div>
-                            </div>
+                            </button>
                         </div>
                         <div class="tool-log-content">
                             <div id="tool-log-empty" class="tool-log-empty">
@@ -196,7 +210,7 @@
 
             <div class="agent-input-container">
                 <div class="agent-input-wrapper">
-                    <textarea id="agent-input" placeholder="Describe what you want to do..." rows="1"></textarea>
+                    <textarea id="agent-input" placeholder="Describe what you want to do... (Enter to send, Shift+Enter for new line)" rows="1" aria-label="Agent chat input"></textarea>
                     <div class="mode-widget">
                         <button id="mode-toggle" class="mode-current">
                             <span id="current-mode-label">Plan</span>
@@ -244,11 +258,16 @@
                             <rect x="6" y="6" width="12" height="12" rx="2"></rect>
                         </svg>
                     </button>
-                    <button id="agent-send" class="btn-icon send-btn" title="Send">
+                    <button id="agent-send" class="btn-icon send-btn" title="Send (Enter)">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <line x1="22" y1="2" x2="11" y2="13"></line>
                             <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
                         </svg>
+
+    <script src="utils/marked.min.js"></script>
+    <script src="utils/icon-cache.js"></script>
+    <script src="utils/icons.js"></script>
+    <script src="utils/toolTemplates.js"></script>
                     </button>
                 </div>
             </div>
@@ -257,11 +276,11 @@
 
     <footer id="status-bar">
         <div class="status-left">
-            <span id="lsp-status" class="status-item">
+            <span id="lsp-status" class="status-item" title="Language Server Protocol status">
                 <span class="status-dot offline"></span>
                 LSP: off
             </span>
-            <span id="git-branch" class="status-item hidden">
+            <span id="git-branch" class="status-item hidden" title="Current git branch">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <line x1="6" y1="3" x2="6" y2="15"></line>
                     <circle cx="18" cy="6" r="3"></circle>
@@ -270,19 +289,90 @@
                 </svg>
                 <span id="branch-name">--</span>
             </span>
+            <span id="mode-indicator" class="status-item hidden" title="Current agent mode">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <path d="M12 6v6l4 2"></path>
+                </svg>
+                <span id="mode-label">--</span>
+            </span>
         </div>
         <div class="status-center">
             <span id="cursor-position" class="status-item">Ln 1, Col 1</span>
+            <span id="file-encoding" class="status-item">UTF-8</span>
+            <span id="file-line-ending" class="status-item">LF</span>
         </div>
         <div class="status-right">
-            <span id="token-usage" class="status-item">Tokens: 0</span>
-            <span id="active-model" class="status-item">--</span>
+            <span id="token-usage" class="status-item" title="Token usage this session">Tokens: 0</span>
+            <span id="active-model" class="status-item" title="Active model">--</span>
+            <span class="status-item status-shortcut-hint" title="Command Palette">
+                <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd>
+            </span>
         </div>
     </footer>
 
+    <div id="diff-popup" class="diff-popup hidden">
+        <div class="diff-popup-backdrop" onclick="closeDiffPopup()"></div>
+        <div class="diff-popup-panel">
+            <div class="diff-popup-header">
+                <h3>Pending Diffs <span id="diff-popup-count">(0)</span></h3>
+                <button class="diff-popup-close" onclick="closeDiffPopup()" aria-label="Close">×</button>
+            </div>
+            <div class="diff-popup-list" id="diff-popup-list"></div>
+            <div class="diff-popup-actions">
+                <button id="diff-reject-all" class="btn-secondary" onclick="rejectAllDiffs()">Reject All</button>
+                <button id="diff-accept-all" class="btn-primary" onclick="acceptAllDiffs()">Accept All</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="task-progress-container" class="hidden">
+        <span id="task-progress-label">Task 0 / 0</span>
+        <div id="task-progress-bar">
+            <div id="task-progress-bar-inner" style="width: 0%"></div>
+        </div>
+        <div id="task-progress-task-list"></div>
+    </div>
+
+    <div id="task-review-popup" class="hidden">
+        <h4 id="task-review-title">Task Review</h4>
+        <div id="task-review-proposals"></div>
+        <div class="task-review-actions">
+            <button class="task-review-reject" onclick="resumeBuild('reject_all_task')">Reject & Continue</button>
+            <button class="task-review-accept" onclick="resumeBuild('accept_all_task')">Accept & Continue</button>
+        </div>
+    </div>
+
+    <div id="toast-container" class="toast-container"></div>
+
+    <div id="command-palette" class="command-palette hidden">
+        <div class="command-palette-backdrop" onclick="closeCommandPalette()"></div>
+        <div class="command-palette-panel">
+            <div class="command-palette-input-wrapper">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="command-palette-icon">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+                <input type="text" id="command-palette-input" placeholder="Type a command or search..." autocomplete="off" spellcheck="false">
+                <kbd class="command-palette-kbd">Esc</kbd>
+            </div>
+            <div class="command-palette-list" id="command-palette-list"></div>
+            <div class="command-palette-footer">
+                <span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
+                <span><kbd>↵</kbd> Execute</span>
+                <span><kbd>Esc</kbd> Close</span>
+            </div>
+        </div>
+    </div>
+
     <script src="utils/marked.min.js"></script>
     <script src="utils/icons.js"></script>
+    <script src="utils/toolTemplates.js"></script>
     <script type="module" src="utils/syntax.js"></script>
     <script src="main.js"></script>
+    <script src="modules/session.js"></script>
+    <script src="modules/tools-ui.js"></script>
+    <script src="modules/snippets.js"></script>
+    <script src="modules/project-index.js"></script>
 </body>
 </html>

@@ -1,9 +1,22 @@
 
 
-
 var FILE_ICONS = {};
+var ICONS_MANIFEST = null;
+var ICONS_DIR = null;
+
+function setIconsManifest(manifest, iconsDir) {
+    ICONS_MANIFEST = manifest;
+    ICONS_DIR = iconsDir;
+}
 
 function loadIcon(name) {
+    if (ICONS_MANIFEST && ICONS_DIR) {
+        var iconFile = ICONS_MANIFEST.icons[name];
+        if (iconFile) {
+            return ICONS_DIR + '/' + iconFile;
+        }
+    }
+
     var paths = {
         '_default_file': 'icons/default_file.svg',
         '_default_folder': 'icons/default_folder.svg',
@@ -42,8 +55,14 @@ function getFileIcon(filename, isDirectory) {
     if (isDirectory) {
         return loadIcon('_default_folder');
     }
-    
-    
+
+    if (ICONS_MANIFEST && ICONS_MANIFEST.filenames) {
+        var iconFile = ICONS_MANIFEST.filenames[filename];
+        if (iconFile) {
+            return ICONS_DIR + '/' + iconFile;
+        }
+    }
+
     if (filename === '.gitignore' || filename === '.gitattributes' || filename === '.gitmodules') {
         return loadIcon('git');
     }
@@ -62,14 +81,13 @@ function getFileIcon(filename, isDirectory) {
     if (filename === 'go.mod' || filename === 'go.sum') {
         return loadIcon('go');
     }
-    
-    
+
     var parts = filename.split('.');
     if (parts.length > 1) {
         var ext = parts[parts.length - 1].toLowerCase();
         return loadIcon(ext);
     }
-    
+
     return loadIcon('_default_file');
 }
 

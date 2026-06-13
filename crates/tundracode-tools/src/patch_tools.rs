@@ -2,8 +2,23 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::path::Path;
 
-use crate::fs_tools::validate_path;
-use crate::{Tool, ToolContext, ToolError, ToolResult};
+use crate::{Tool, ToolCategory, ToolContext, ToolError, ToolResult};
+use tundracode_permissions::Capability;
+use tundracode_security::path_guard::{ensure_within_workspace, is_tundracode_path};
+
+fn resolve_path(context: &ToolContext, path: &str) -> Result<std::path::PathBuf, ToolError> {
+    let workspace = Path::new(&context.workspace_path);
+    let target = if Path::new(path).is_absolute() {
+        Path::new(path).to_path_buf()
+    } else {
+        workspace.join(path)
+    };
+
+    ensure_within_workspace(workspace, &target)
+        .map_err(|e| ToolError::ExecutionFailed(e))?;
+
+    Ok(target)
+}
 
 pub struct ApplyPatchTool;
 
@@ -13,27 +28,26 @@ impl Tool for ApplyPatchTool {
         "ApplyPatch"
     }
     fn description(&self) -> &'static str {
-        "Aplica un unified diff sobre un archivo existente. Mas preciso que WriteFile, produce diffs reviewables."
+        "ApplyPatch: applies a unified diff. More precise than WriteFile. Params: p (path), d (diff)"
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Patch
+    }
+    fn required_capabilities(&self) -> Vec<Capability> {
+        vec![Capability::ApplyPatch { path_pattern: None }]
     }
     fn parameters_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Ruta del archivo relativa al workspace" },
-                "diff": { "type": "string", "description": "Unified diff a aplicar" }
-            },
-            "required": ["path", "diff"]
-        })
+        serde_json::json!({"properties":{"p":{"type":"string"},"d":{"type":"string"}},"required":["p","d"]})
     }
     async fn execute(&self, context: &ToolContext, params: Value) -> Result<ToolResult, ToolError> {
-        let path = params["path"]
+        let path = params["p"]
             .as_str()
-            .ok_or_else(|| ToolError::InvalidParameters("path required".to_string()))?;
-        let diff = params["diff"]
+            .ok_or_else(|| ToolError::InvalidParameters("p required".to_string()))?;
+        let diff = params["d"]
             .as_str()
-            .ok_or_else(|| ToolError::InvalidParameters("diff required".to_string()))?;
+            .ok_or_else(|| ToolError::InvalidParameters("d required".to_string()))?;
 
-        let full_path = validate_path(context, path)?;
+        let full_path = resolve_path(context, path)?;
 
         if is_tundracode_path(&full_path) {
             return Err(ToolError::ExecutionFailed(
@@ -65,19 +79,7 @@ impl Tool for ApplyPatchTool {
     }
 }
 
-fn is_tundracode_path(path: &Path) -> bool {
-    path.components().any(|c| {
-        c.as_os_str()
-            .to_str()
-            .map(|s| s == ".tundracode")
-            .unwrap_or(false)
-    })
-}
-
-
-
-
-fn apply_unified_diff(original: &str, diff: &str) -> Result<String, ToolError> {
+pub fn apply_unified_diff(original: &str, diff: &str) -> Result<String, ToolError> {
     use similar::ChangeTag;
 
     let mut new_lines: Vec<String> = original.lines().map(|s| s.to_string()).collect();
@@ -125,7 +127,7 @@ fn apply_unified_diff(original: &str, diff: &str) -> Result<String, ToolError> {
                 &mut current_new_idx,
                 &mut hunk_changes,
             )?;
-            
+
             let parts: Vec<&str> = hunk_header.split_whitespace().collect();
             if let Some(first) = parts.first() {
                 let old_start = first

@@ -1,0 +1,17 @@
+/target
+Cargo.lock
+.tundracode
+node_modules/
+scripts
+dist/
+*.log
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.github
+.git
+.vscode/
+*.iml
+
